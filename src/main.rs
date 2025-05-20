@@ -411,36 +411,69 @@ mod vcf_processing {
                         }
                         match value_option_result { // value_option_result is Result<Option<Value<'_>>>
                             Ok(Some(vcf::variant::record::samples::series::Value::String(gt_string_cow))) => {
-                                if let Some(gt_val) = parse_gt_to_option_u8(gt_string_cow.as_ref()) {
-                                    temp_genotypes_for_variant.push(gt_val);
-                                } else {
+                                    let gt_str_slice = gt_string_cow.as_ref();
+                                    if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
+                                        temp_genotypes_for_variant.push(gt_val);
+                                    } else {
+                                        debug!(
+                                            "Variant at {}:{}: GT field (String type) for sample {} was unparsable ('{}'), skipping processing for this variant.",
+                                            record.reference_sequence_name(),
+                                            record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                            sample_idx,
+                                            gt_str_slice
+                                        );
+                                        has_any_missing_or_unparsable_gt = true;
+                                        break;
+                                    }
+                                }
+                                Ok(Some(vcf::variant::record::samples::series::Value::Genotype(boxed_gt))) => {
+                                    // Fix later
+                                    // Broken trait bound
+                                    let gt_str_slice = (&*boxed_gt).as_ref();
+                                    if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
+                                        temp_genotypes_for_variant.push(gt_val);
+                                    } else {
+                                        debug!(
+                                            "Variant at {}:{}: GT field (Genotype type) for sample {} was unparsable ('{}'), skipping processing for this variant.",
+                                            record.reference_sequence_name(),
+                                            record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                            sample_idx,
+                                            gt_str_slice // This is now correctly &str for formatting and parsing
+                                        );
+                                        has_any_missing_or_unparsable_gt = true;
+                                        break;
+                                    }
+                                }
+                                Ok(Some(other_type)) => {
+                                    // This arm now catches other Value types that are not String or Genotype.
+                                    debug!("Variant at {}:{}: GT field for sample {} is an unexpected VCF Value type (type: {:?}), skipping processing for this variant.",
+                                        record.reference_sequence_name(),
+                                        record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                        sample_idx,
+                                        other_type);
                                     has_any_missing_or_unparsable_gt = true;
                                     break;
                                 }
-                            }
-                            Ok(Some(other_type)) => {
-                                debug!("Variant at {}:{}: GT field for sample {} is not a String (type: {:?}), skipping variant.",
-                                    record.reference_sequence_name(),
-                                    record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                                    sample_idx,
-                                    other_type);
-                                has_any_missing_or_unparsable_gt = true;
-                                break;
-                            }
-                            Ok(None) => { // Missing GT for this sample (e.g. value was '.')
-                                has_any_missing_or_unparsable_gt = true;
-                                break;
-                            }
-                            Err(e) => { // Error parsing a specific value in the series
-                                warn!(
-                                    "Error parsing a genotype value for variant at {}:{} in VCF {}: {}",
-                                    record.reference_sequence_name(),
-                                    record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                                    vcf_path.display(), e
-                                );
-                                has_any_missing_or_unparsable_gt = true;
-                                break;
-                            }
+                                Ok(None) => { // Missing GT for this sample (e.g. value was '.'). noodles_vcf may parse "." as None.
+                                    debug!(
+                                        "Variant at {}:{}: GT field for sample {} is missing (None value), skipping processing for this variant.",
+                                        record.reference_sequence_name(),
+                                        record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                        sample_idx
+                                    );
+                                    has_any_missing_or_unparsable_gt = true;
+                                    break;
+                                }
+                                Err(e) => { // Error parsing a specific value in the series
+                                    warn!(
+                                        "Error parsing a genotype value for variant at {}:{} in VCF {}: {}. Skipping processing for this variant.",
+                                        record.reference_sequence_name(),
+                                        record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                        vcf_path.display(), e
+                                    );
+                                    has_any_missing_or_unparsable_gt = true;
+                                    break;
+                                }
                         }
                     }
                 }
