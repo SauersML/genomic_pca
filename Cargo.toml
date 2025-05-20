@@ -13,8 +13,8 @@ indicatif = "0.17.11"
 log = "0.4.27"
 ndarray = "0.16.1"
 noodles-vcf = "0.78.0"
+num_cpus = "1.16.0"
 rayon = "1.10.0"
-
 
 [profile.release]
 lto = true
