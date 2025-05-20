@@ -1,3 +1,103 @@
+# Genomic PCA Tool
+
+## Overview
+
+`genomic_pca` is a command-line tool written in Rust for performing Principal Component Analysis (PCA) on genomic variant data from VCF (Variant Call Format) files. It processes multiple VCF files, filters variants based on criteria like Minor Allele Frequency (MAF), constructs a genotype matrix, and then runs PCA to identify principal components.
+
+The tool outputs:
+* Principal components for each sample.
+* Eigenvalues (variance explained by each PC).
+* Variant loadings (contribution of each variant to each PC).
+
+## Prerequisites
+
+* **Rust Toolchain:** You can install it from [rustup.rs](https://rustup.rs/).
+* **VCF Files:** Input VCF files (`.vcf` or `.vcf.gz`). It's assumed that all VCF files share the same set of samples in the same order. The sample information is taken from the first VCF file processed.
+
+## Building
+
+```bash
+cargo build --release
+```
+
+The executable will be located at `target/release/genomic_pca`.
+
+## Running the Tool
+
+You can run the tool using `cargo run` (which will compile and then run) or by directly executing the compiled binary.
+
+### Using `cargo run`
+
+  * **Debug mode:**
+    ```bash
+    cargo run -- [OPTIONS]
+    ```
+  * **Release mode (recommended for actual analysis):**
+    ```bash
+    cargo run --release -- [OPTIONS]
+    ```
+    The `--` separates arguments for `cargo run` from the arguments for `genomic_pca`.
+
+### Directly Executing the Binary
+
+  * After a debug build:
+    ```bash
+    ./target/debug/genomic_pca [OPTIONS]
+    ```
+  * After a release build:
+    ```bash
+    ./target/release/genomic_pca [OPTIONS]
+    ```
+
+### Command-Line Options
+
+The following command-line options are available:
+
+| Option                         | Short | Description                                                                      | Required | Default Value |
+|--------------------------------|-------|----------------------------------------------------------------------------------|----------|---------------|
+| `--vcf-dir <VCF_DIR>`          | `-d`  | Directory containing input VCF/VCF.gz files.                                     | Yes      | N/A           |
+| `--out <OUTPUT_PREFIX>`        | `-o`  | Prefix for output files (e.g., "analysis/pca\_results").                       | Yes      | N/A           |
+| `--components <COMPONENTS>`    | `-k`  | Number of principal components to compute.                                       | Yes      | N/A           |
+| `--maf <MAF>`                  |       | Minimum Minor Allele Frequency (MAF) threshold for variants.                     | No       | `0.01`        |
+| `--rfit-seed <RFIT_SEED>`      |       | Seed for randomized PCA (rfit) for reproducible results.                         | No       | None          |
+| `--threads <THREADS>`          | `-t`  | Number of threads for parallel operations. Defaults to available physical cores. | No       | (CPU count)   |
+| `--log-level <LOG_LEVEL>`      |       | Logging verbosity. Options: `Error`, `Warn`, `Info`, `Debug`, `Trace`.           | No       | `Info`        |
+| `--help`                       | `-h`  | Print help information.                                                          | No       | N/A           |
+| `--version`                    | `-V`  | Print version information.                                                       | No       | N/A           |
+
+### Example Usage
+
+Assuming your VCF files are in a folder named `vcfs` in the current directory, and you want to compute 10 principal components, outputting files with the prefix `pca_output/run1`:
+
+**Using `cargo run` (release mode):**
+
+```bash
+cargo run --release -- \
+    --vcf-dir ./vcfs \
+    --out pca_output/run1 \
+    --components 10 \
+    --maf 0.05 \
+    --threads 8 \
+    --log-level Info
+```
+
+**Using the compiled release binary:**
+
+```bash
+./target/release/genomic_pca \
+    --vcf-dir ./vcfs \
+    --out pca_output/run1 \
+    --components 10 \
+    --maf 0.05 \
+    --threads 8 \
+    --log-level Info
+```
+
+This will generate files like:
+
+  * `pca_output/run1.pca.tsv` (principal components for samples)
+  * `pca_output/run1.eigenvalues.tsv` (variance explained by PCs)
+  * `pca_output/run1.loadings.tsv` (variant loadings)
 
 
 ### Testing
