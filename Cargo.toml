@@ -1,0 +1,24 @@
+[package]
+name = "genomic_pca"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool for performing PCA on genomic data from VCF files."
+
+[dependencies]
+anyhow = "1.0.98"
+clap = "4.5.38"
+efficient_pca = "0.1.5"
+env_logger = "0.11.8"
+indicatif = "0.17.11"
+log = "0.4.27"
+ndarray = "0.16.1"
+noodles-vcf = "0.78.0"
+rayon = "1.10.0"
+
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
+opt-level = 3
