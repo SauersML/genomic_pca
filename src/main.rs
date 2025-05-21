@@ -7,7 +7,7 @@ use efficient_pca::PCA as EfficientPcaModel;
 use env_logger;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
-use ndarray::{Array2, Axis};
+use ndarray::{Array2};
 use noodles_vcf::{
     self as vcf,
     Header as VcfHeader,
