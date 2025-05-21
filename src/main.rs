@@ -282,9 +282,11 @@ mod vcf_processing {
     use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, cli};
     use noodles_vcf::{
         self as vcf,
-        variant::record::AlternateBases as _, // For alt_bases_obj.len() and .as_ref()
+        variant::record::{
+            samples::series::value::genotype::Phasing, AlternateBases as _,
+        },
         // noodles_vcf::record::samples::Series is concrete, Series trait for dyn dispatch
-        variant::record::samples::Series as VcfSeriesTrait, 
+        variant::record::samples::Series as VcfSeriesTrait,
     };
 
     #[derive(Debug)]
@@ -335,7 +337,7 @@ mod vcf_processing {
     pub(crate) fn process_single_vcf(
         vcf_path: &Path,
         canonical_samples_info: Arc<SamplesHeaderInfo>,
-        cli_args: &cli::CliArgs,
+        cli_args: &cli::CliArgs, // Mark as unused if not used, or remove. Currently it's used for cli_args.maf
         first_vcf_path_for_error_msg: &Path,
     ) -> Result<Option<Vec<VariantGenotypeData>>> {
         debug!("Processing VCF: {}", vcf_path.display());
@@ -378,10 +380,11 @@ mod vcf_processing {
 
             if ref_bases_str.len() != 1
                 || alt_bases_obj.len() != 1 
-                || alt_bases_obj.as_ref().len() != 1
+                || alt_bases_obj.as_ref().len() != 1 // Checks if the first (and only) alternate allele is a single base/string
+                || alt_bases_obj.as_ref().iter().next().map_or(true, |b| b.len() != 1) // Make sure the actual ALT base string is length 1
             {
                 debug!(
-                    "Variant at {}:{} (REF:{}, ALT:{}) is not a bi-allelic SNP, skipping.",
+                    "Variant at {}:{} (REF:{}, ALT:{}) is not a bi-allelic SNP (single base REF, single base ALT), skipping.",
                     record.reference_sequence_name(),
                     record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
                     ref_bases_str,
@@ -394,12 +397,10 @@ mod vcf_processing {
                 Vec::with_capacity(canonical_samples_info.sample_count);
             let mut has_any_missing_or_unparsable_gt = false;
             
-            let samples_obj = record.samples(); // This is noodles_vcf::record::Samples<'_>
+            let samples_obj = record.samples();
 
-            match samples_obj.select(gt_key_str) { // Use select with &str key
-                Some(gt_series_struct) => { // gt_series_struct is noodles_vcf::record::samples::Series<'r>
-                    // The trait VcfSeriesTrait might be needed if gt_series_struct is used with dynamic dispatch later,
-                    // but iter() here is on the concrete type.
+            match samples_obj.select(gt_key_str) {
+                Some(gt_series_struct) => {
                     for (sample_idx, value_option_result) in gt_series_struct.iter(&current_header).enumerate() {
                         if sample_idx >= canonical_samples_info.sample_count {
                             warn!("More GT values in series than expected samples for variant at {}:{}. VCF: {}. Truncating.",
@@ -409,8 +410,10 @@ mod vcf_processing {
                             has_any_missing_or_unparsable_gt = true;
                             break;
                         }
-                        match value_option_result { // value_option_result is Result<Option<Value<'_>>>
-                            Ok(Some(vcf::variant::record::samples::series::Value::String(gt_string_cow))) => {
+                        match value_option_result {
+                            Ok(Some(vcf::variant::record::samples::series::Value::String(gt_string_cow_opt))) => {
+                                // Value::String is Option<Cow<'a, str>>
+                                if let Some(gt_string_cow) = gt_string_cow_opt {
                                     let gt_str_slice = gt_string_cow.as_ref();
                                     if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
                                         temp_genotypes_for_variant.push(gt_val);
@@ -425,38 +428,9 @@ mod vcf_processing {
                                         has_any_missing_or_unparsable_gt = true;
                                         break;
                                     }
-                                }
-                                Ok(Some(vcf::variant::record::samples::series::Value::Genotype(boxed_gt))) => {
-                                    // Fix later
-                                    // Broken trait bound
-                                    let gt_str_slice = (&*boxed_gt).as_ref();
-                                    if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
-                                        temp_genotypes_for_variant.push(gt_val);
-                                    } else {
-                                        debug!(
-                                            "Variant at {}:{}: GT field (Genotype type) for sample {} was unparsable ('{}'), skipping processing for this variant.",
-                                            record.reference_sequence_name(),
-                                            record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                                            sample_idx,
-                                            gt_str_slice // This is now correctly &str for formatting and parsing
-                                        );
-                                        has_any_missing_or_unparsable_gt = true;
-                                        break;
-                                    }
-                                }
-                                Ok(Some(other_type)) => {
-                                    // This arm now catches other Value types that are not String or Genotype.
-                                    debug!("Variant at {}:{}: GT field for sample {} is an unexpected VCF Value type (type: {:?}), skipping processing for this variant.",
-                                        record.reference_sequence_name(),
-                                        record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                                        sample_idx,
-                                        other_type);
-                                    has_any_missing_or_unparsable_gt = true;
-                                    break;
-                                }
-                                Ok(None) => { // Missing GT for this sample (e.g. value was '.'). noodles_vcf may parse "." as None.
-                                    debug!(
-                                        "Variant at {}:{}: GT field for sample {} is missing (None value), skipping processing for this variant.",
+                                } else { // String value was None (e.g. field was present but value was '.', parsed as missing string by series iterator)
+                                     debug!(
+                                        "Variant at {}:{}: GT field (String type) for sample {} was present but missing (None/'.'), skipping processing for this variant.",
                                         record.reference_sequence_name(),
                                         record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
                                         sample_idx
@@ -464,20 +438,107 @@ mod vcf_processing {
                                     has_any_missing_or_unparsable_gt = true;
                                     break;
                                 }
-                                Err(e) => { // Error parsing a specific value in the series
-                                    warn!(
-                                        "Error parsing a genotype value for variant at {}:{} in VCF {}: {}. Skipping processing for this variant.",
+                            }
+                            Ok(Some(vcf::variant::record::samples::series::Value::Genotype(boxed_gt))) => {
+                                let genotype_trait_object = &*boxed_gt;
+                                let mut allele_parts: Vec<String> = Vec::with_capacity(2);
+                                let mut overall_phasing = Phasing::Unphased; 
+                                let mut iteration_failed = false;
+                                let mut collected_alleles = 0;
+
+                                for result_item in genotype_trait_object.iter() {
+                                    if collected_alleles >= 2 { // Process at most 2 alleles for diploid
+                                        break;
+                                    }
+                                    match result_item {
+                                        Ok((opt_allele_idx, current_phasing)) => {
+                                            let allele_str = match opt_allele_idx {
+                                                Some(0) => "0".to_string(),
+                                                Some(1) => "1".to_string(),
+                                                Some(idx) => idx.to_string(), // Other indices will make parse_gt_to_option_u8 fail
+                                                None => ".".to_string(),    // Missing allele
+                                            };
+                                            allele_parts.push(allele_str);
+                                            if current_phasing == Phasing::Phased {
+                                                overall_phasing = Phasing::Phased;
+                                            }
+                                            collected_alleles += 1;
+                                        }
+                                        Err(_) => {
+                                            debug!(
+                                                "Variant at {}:{}: Error iterating alleles for GT field of sample {}, skipping.",
+                                                record.reference_sequence_name(),
+                                                record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                                sample_idx
+                                            );
+                                            iteration_failed = true;
+                                            break; 
+                                        }
+                                    }
+                                }
+
+                                if iteration_failed {
+                                    has_any_missing_or_unparsable_gt = true;
+                                    break; 
+                                }
+
+                                let reconstructed_gt_string = if allele_parts.len() == 2 {
+                                    let phasing_char = if overall_phasing == Phasing::Phased { '|' } else { '/' };
+                                    format!("{}{}{}", allele_parts[0], phasing_char, allele_parts[1])
+                                } else if allele_parts.len() == 1 {
+                                     allele_parts[0].clone() // e.g. "0" or ".", will be rejected by parse_gt_to_option_u8 length check
+                                }
+                                 else { // 0 or >2 parts
+                                    ".".to_string() // Default to ensure parse_gt_to_option_u8 fails
+                                };
+                                
+                                if let Some(gt_val) = parse_gt_to_option_u8(&reconstructed_gt_string) {
+                                    temp_genotypes_for_variant.push(gt_val);
+                                } else {
+                                    debug!(
+                                        "Variant at {}:{}: Reconstructed GT string ('{}') for sample {} from Value::Genotype was unparsable by parse_gt_to_option_u8.",
                                         record.reference_sequence_name(),
                                         record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                                        vcf_path.display(), e
+                                        reconstructed_gt_string,
+                                        sample_idx
                                     );
                                     has_any_missing_or_unparsable_gt = true;
                                     break;
                                 }
+                            }
+                            Ok(Some(other_type)) => {
+                                debug!("Variant at {}:{}: GT field for sample {} is an unexpected VCF Value type (type: {:?}), skipping processing for this variant.",
+                                    record.reference_sequence_name(),
+                                    record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                    sample_idx,
+                                    other_type);
+                                has_any_missing_or_unparsable_gt = true;
+                                break;
+                            }
+                            Ok(None) => { 
+                                debug!(
+                                    "Variant at {}:{}: GT field for sample {} is missing (None value from series iterator), skipping processing for this variant.",
+                                    record.reference_sequence_name(),
+                                    record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                    sample_idx
+                                );
+                                has_any_missing_or_unparsable_gt = true;
+                                break;
+                            }
+                            Err(e) => { 
+                                warn!(
+                                    "Error parsing a genotype value for variant at {}:{} in VCF {}: {}. Skipping processing for this variant.",
+                                    record.reference_sequence_name(),
+                                    record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                                    vcf_path.display(), e
+                                );
+                                has_any_missing_or_unparsable_gt = true;
+                                break;
+                            }
                         }
                     }
                 }
-                None => { // "GT" key not found by select, or no series for key
+                None => { 
                     debug!(
                         "Variant at {}:{}: GT series not found in VCF {}.",
                         record.reference_sequence_name(),
@@ -492,13 +553,13 @@ mod vcf_processing {
                 || temp_genotypes_for_variant.len() != canonical_samples_info.sample_count
             {
                 debug!(
-                    "Variant at {}:{}:{} in VCF {} dropped (missing/unparsable/incomplete GTs: {}/{}).",
+                    "Variant at {}:{}:{} in VCF {} dropped (missing/unparsable/incomplete GTs: {}/{} processed).",
                     record.reference_sequence_name(),
                     record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                    record.reference_bases(), // For more context
+                    record.reference_bases(), 
                     vcf_path.display(),
-                    temp_genotypes_for_variant.len(),
-                    canonical_samples_info.sample_count
+                    temp_genotypes_for_variant.len(), // Number of GTs successfully parsed for this variant
+                    canonical_samples_info.sample_count // Expected number of samples
                 );
                 continue;
             }
@@ -506,7 +567,7 @@ mod vcf_processing {
             let allele_sum: u32 = temp_genotypes_for_variant.iter().map(|&g| g as u32).sum();
             let num_alleles_total: u32 = (canonical_samples_info.sample_count * 2) as u32;
 
-            if num_alleles_total == 0 { // Should not happen if sample_count > 0
+            if num_alleles_total == 0 { 
                 debug!(
                     "Variant at {}:{}: No alleles to calculate MAF (num_alleles_total is 0). Skipping.",
                     record.reference_sequence_name(),
@@ -529,11 +590,18 @@ mod vcf_processing {
                 );
                 continue;
             }
+            
+            // Get the first alternate allele string for the ID
+            // alt_bases_obj here is AlternateBases which can be iterated.
+            // We've already filtered for bi-allelic SNPs where alt_bases_obj.len() == 1
+            // and the first alt allele is a single base/string.
+            let alt_allele_str = alt_bases_obj.as_ref().iter().next()
+                .map(|bs| bs.to_string())
+                .unwrap_or_else(|| String::from("N")); // Fallback, though filtering should prevent this for SNPs.
 
             let chrom_str = record.reference_sequence_name().to_string();
             let pos_val = record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
-            let alt_allele_str = alt_bases_obj.as_ref().to_string(); // This is correct
-
+            
             let variant_id =
                 format!("{}:{}:{}:{}", chrom_str, pos_val, ref_bases_str, alt_allele_str);
 
