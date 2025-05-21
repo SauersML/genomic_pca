@@ -16,7 +16,7 @@ The tool outputs:
 
 ## Building
 
-```bash
+```
 cargo build --release
 ```
 
@@ -29,11 +29,11 @@ You can run the tool using `cargo run` (which will compile and then run) or by d
 ### Using `cargo run`
 
   * **Debug mode:**
-    ```bash
+    ```
     cargo run -- [OPTIONS]
     ```
   * **Release mode (recommended for actual analysis):**
-    ```bash
+    ```
     cargo run --release -- [OPTIONS]
     ```
     The `--` separates arguments for `cargo run` from the arguments for `genomic_pca`.
@@ -41,11 +41,11 @@ You can run the tool using `cargo run` (which will compile and then run) or by d
 ### Directly Executing the Binary
 
   * After a debug build:
-    ```bash
+    ```
     ./target/debug/genomic_pca [OPTIONS]
     ```
   * After a release build:
-    ```bash
+    ```
     ./target/release/genomic_pca [OPTIONS]
     ```
 
@@ -71,7 +71,7 @@ Assuming your VCF files are in a folder named `vcfs` in the current directory, a
 
 **Using `cargo run` (release mode):**
 
-```bash
+```
 cargo run --release -- \
     --vcf-dir ./vcfs \
     --out pca_output/run1 \
@@ -83,7 +83,7 @@ cargo run --release -- \
 
 **Using the compiled release binary:**
 
-```bash
+```
 ./target/release/genomic_pca \
     --vcf-dir ./vcfs \
     --out pca_output/run1 \
@@ -120,4 +120,31 @@ if [ -s download_urls.txt ] && [ $(wc -l < download_urls.txt) -gt 1 ]; then
 else
     echo "Error: download_urls.txt has insufficient content."
 fi
+```
+
+### Profiling
+
+Run:
+```
+cargo build --profile profiling
+```
+
+Make sure samply is installed:
+```
+cargo install samply
+```
+
+```
+RUST_BACKTRACE=1 samply record ./target/profiling/genomic_pca \
+    --vcf-dir ./vcfs \
+    --out pca_output/run1 \
+    --components 10 \
+    --maf 0.05 \
+    --threads 8 \
+    --log-level Info
+```
+
+If there is an error, consider running:
+```
+echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
 ```
