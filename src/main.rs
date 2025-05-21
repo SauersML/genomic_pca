@@ -670,16 +670,17 @@ mod matrix_ops {
 }
 
 mod pca_runner {
-    use super::{anyhow, warn, info, Result, Error, Array2, Axis, EfficientPcaModel, cli};
+    use super::{anyhow, warn, info, Result, Error, Array2, EfficientPcaModel, cli};
 
     pub(crate) fn run_genomic_pca(
-        genotype_matrix: Array2<f64>,
+        genotype_matrix: Array2<f64>, // This matrix is consumed by rfit
         cli_args: &cli::CliArgs,
     ) -> Result<(EfficientPcaModel, Array2<f64>, Vec<f64>), Error> {
         let mut pca_model = EfficientPcaModel::new();
-        let mut k_actual = cli_args.components;
+        let mut k_requested_components = cli_args.components;
 
-        if k_actual == 0 {
+        // --- 1. Validate Input Parameters ---
+        if k_requested_components == 0 {
             return Err(anyhow!("Number of components (-k) must be > 0."));
         }
 
@@ -690,54 +691,101 @@ mod pca_runner {
             return Err(anyhow!("PCA requires at least 2 samples, found {}.", num_samples));
         }
         if num_features == 0 {
-            return Err(anyhow!("PCA requires at least 1 variant, found 0."));
+            // This check is important as efficient_pca::rfit itself also errors on 0 features.
+            return Err(anyhow!("PCA requires at least 1 variant (feature), found 0."));
         }
 
+        // Adjust k_requested_components if it exceeds maximum possible rank
         let max_possible_k = num_samples.min(num_features);
-        if k_actual > max_possible_k {
+        if k_requested_components > max_possible_k {
             warn!(
-                "Requested k={} exceeds max possible ({}), adjusting to {}.",
-                k_actual, max_possible_k, max_possible_k
+                "Requested k={} components exceeds max possible for data ({} samples x {} features), which is {}. Adjusting to {}.",
+                k_requested_components, num_samples, num_features, max_possible_k, max_possible_k
             );
-            k_actual = max_possible_k;
-        }
-        if k_actual == 0 {
-            return Err(anyhow!("Effective k is 0 for matrix ({}x{}).", num_samples, num_features));
+            k_requested_components = max_possible_k;
         }
 
-        let n_oversamples = 10;
+        // If, after adjustment, k is 0 (e.g., if max_possible_k was 0, though num_features=0 is caught above), error out.
+        if k_requested_components == 0 {
+            // This could happen if max_possible_k is 0 because n_samples or n_features is 0,
+            // although specific checks for num_features == 0 and num_samples < 2 exist.
+            // This check ensures k_requested_components for rfit is non-zero.
+            return Err(anyhow!(
+                "Effective number of components to request (k_requested_components) is 0 for matrix ({} samples x {} features). Cannot proceed.",
+                num_samples, num_features
+            ));
+        }
+
+        // --- 2. Run PCA using efficient_pca::rfit ---
+        // `efficient_pca::PCA::rfit` now consumes the genotype_matrix and
+        // returns the principal component scores directly. It also populates the pca_model.
+        let n_oversamples = 10; // Standard oversampling parameter for randomized SVD
         let seed = cli_args.rfit_seed;
-        let tolerance_rfit = None;
+        // `tolerance_rfit` is set to None, meaning rfit uses its default behavior.
+        let tolerance_rfit = None; 
 
         info!(
-            "Running efficient_pca rfit: k={}, oversamples={}, seed={:?}, tolerance=None",
-            k_actual, n_oversamples, seed
+            "Running efficient_pca rfit: k_requested={}, n_oversamples={}, seed={:?}, rfit_tolerance=None",
+            k_requested_components, n_oversamples, seed
         );
         
-        let matrix_for_rfit = genotype_matrix.clone(); // rfit can modify the matrix
-        pca_model
-            .rfit(matrix_for_rfit, k_actual, n_oversamples, seed, tolerance_rfit)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-        let computed_k_in_model = pca_model.rotation().map_or(0, |r| r.ncols());
-        if computed_k_in_model == 0 && k_actual > 0 {
-             warn!("PCA model resulted in 0 components despite requesting {}.", k_actual);
-            let transformed_pcs_empty = Array2::<f64>::zeros((num_samples, 0));
-            let pc_variances_empty = Vec::new();
-            return Ok((pca_model, transformed_pcs_empty, pc_variances_empty));
-        } else if computed_k_in_model < k_actual {
-            info!("PCA model computed {} components (requested/capped at {}).", computed_k_in_model, k_actual);
-        }
-
         let transformed_pcs = pca_model
-            .transform(genotype_matrix) // transform expects original or similar data
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            .rfit(
+                genotype_matrix, // Consumed here, no prior clone needed
+                k_requested_components,
+                n_oversamples,
+                seed,
+                tolerance_rfit, // Pass the tolerance if/when supported and desired from CLI
+            )
+            .map_err(|e| anyhow!("PCA computation with rfit failed: {}", e.to_string()))?;
+        
+        // `rfit` populates self.rotation and self.explained_variance within pca_model.
+        // The number of columns in transformed_pcs is the actual number of components kept by rfit.
+        let num_components_kept = transformed_pcs.ncols();
 
-        let pc_variances: Vec<f64> = transformed_pcs
-            .axis_iter(Axis(1))
-            .map(|pc_column| pc_column.var(0.0))
-            .collect();
+        // --- 3. Handle Results and Variances ---
+        if num_components_kept == 0 && k_requested_components > 0 {
+            // This warning is useful if rfit decided to keep 0 components due to data properties or internal logic,
+            // even if components were requested.
+            warn!(
+                "PCA model resulted in 0 components being kept by rfit, despite requesting {} (adjusted from {}). This can occur with low-rank data or strict tolerance if used.",
+                num_components_kept, cli_args.components
+            );
+            // transformed_pcs from rfit will be an N x 0 matrix in this case.
+            // pca_model.explained_variance() should also yield an empty or zeroed vector.
+        } else if num_components_kept < k_requested_components {
+            // Log if the number of components rfit decided to keep is less than what was requested (after adjustments).
+            info!(
+                "PCA model effectively computed {} components (requested/capped at {}).",
+                num_components_kept, k_requested_components
+            );
+        }
+        // The explicit pca_model.transform call on the original genotype_matrix is no longer needed.
 
+        // Get principal component variances (eigenvalues) from the PCA model.
+        // `efficient_pca::PCA::rfit` is responsible for populating `explained_variance` correctly.
+        let pc_variances: Vec<f64> = pca_model.explained_variance()
+            .map_or_else(
+                || {
+                    // This case should ideally not happen if rfit ran successfully and num_components_kept > 0.
+                    // If num_components_kept is 0, explained_variance should be Some(empty_array).
+                    warn!("Explained variance not available from PCA model; variance output will be empty. This is unexpected if components were produced.");
+                    Vec::new()
+                },
+                |variances_array| {
+                    // Sanity check: the number of variances should match the number of PC columns.
+                    if variances_array.len() != num_components_kept {
+                        warn!(
+                            "Mismatch between count of explained variances in model ({}) and number of computed PC columns ({}). Using model's variances.",
+                            variances_array.len(), num_components_kept
+                        );
+                        // Despite warning, we trust the model's `explained_variance` as the primary source.
+                    }
+                    variances_array.to_vec()
+                }
+            );
+
+        // The function returns the fitted model, the PC scores for the training data, and their variances.
         Ok((pca_model, transformed_pcs, pc_variances))
     }
 }
