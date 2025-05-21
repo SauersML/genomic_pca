@@ -12,7 +12,7 @@ env:
   SAMPLY_OUTPUT_FILE: profile.json
   SAMPLY_ARTIFACT_NAME: samply-profile-json
   PROFILED_BINARY_ARTIFACT_NAME: profiled-genomic-pca-binary
-  CARGO_BIN_CACHE_VERSION: v1 
+  CARGO_BIN_CACHE_VERSION: v1
 
 jobs:
   build_profile_and_test:
@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         id: cache-cargo-bin
         with:
-          path: ${{ env.CARGO_HOME }}/bin 
+          path: ${{ env.CARGO_HOME }}/bin
           key: ${{ runner.os }}-cargo-bin-${{ env.CARGO_BIN_CACHE_VERSION }}-${{ steps.rust_version.outputs.version }}
           restore-keys: |
             ${{ runner.os }}-cargo-bin-${{ env.CARGO_BIN_CACHE_VERSION }}-
@@ -67,15 +67,18 @@ jobs:
             ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-
             ${{ runner.os }}-target-
 
-      - name: Install samply (if not cached)
+      - name: Ensure samply is installed and in PATH
+        shell: bash
         run: |
-          echo "${{ env.CARGO_HOME }}/bin" >> $GITHUB_PATH
-          if ! command -v samply &> /dev/null
-          then
-              echo "samply not found, installing..."
-              cargo install samply 
+          TARGET_CARGO_BIN_DIR="${{ env.CARGO_HOME }}/bin"
+          echo "$TARGET_CARGO_BIN_DIR" >> $GITHUB_PATH
+          export CARGO_HOME="${{ env.CARGO_HOME }}"
+
+          if [ -x "$TARGET_CARGO_BIN_DIR/samply" ]; then
+            echo "samply found and executable in $TARGET_CARGO_BIN_DIR (likely from cache)."
           else
-              echo "samply found in cache."
+            echo "samply not found or not executable in $TARGET_CARGO_BIN_DIR. Installing..."
+            cargo install samply
           fi
 
       - name: Verify samply installation
@@ -91,7 +94,7 @@ jobs:
         run: |
           mkdir -p test_vcf_data
           cp tests/chr22_chunk.vcf.gz test_vcf_data/
-          mkdir -p pca_output_ci 
+          mkdir -p pca_output_ci
 
       - name: Run Profiling with Samply
         id: run_samply_profiling
@@ -113,14 +116,14 @@ jobs:
         with:
           name: ${{ env.PROFILED_BINARY_ARTIFACT_NAME }}
           path: ./target/${{ env.PROFILING_PROFILE }}/genomic_pca
-          if-no-files-found: error 
+          if-no-files-found: error
 
       - name: Upload Samply Profile JSON
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.SAMPLY_ARTIFACT_NAME }}
           path: ${{ env.SAMPLY_OUTPUT_FILE }}
-          if-no-files-found: error 
+          if-no-files-found: error
 
       - name: Run tests (standard build)
         run: cargo test --verbose
