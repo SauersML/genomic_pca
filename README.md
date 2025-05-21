@@ -77,7 +77,6 @@ cargo run --release -- \
     --out pca_output/run1 \
     --components 10 \
     --maf 0.05 \
-    --threads 8 \
     --log-level Info
 ```
 
@@ -89,7 +88,6 @@ cargo run --release -- \
     --out pca_output/run1 \
     --components 10 \
     --maf 0.05 \
-    --threads 8 \
     --log-level Info
 ```
 
