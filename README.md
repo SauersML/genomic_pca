@@ -148,3 +148,8 @@ If there is an error, consider running:
 ```
 echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
 ```
+
+Or, download the GitHub Actions artifact `samply-profile-json.zip`, then run:
+```
+unzip -o samply-profile-json.zip profile.json && samply load profile.json
+```
