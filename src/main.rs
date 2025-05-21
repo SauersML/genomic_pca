@@ -378,10 +378,9 @@ mod vcf_processing {
             let ref_bases_str = record.reference_bases();
             let alt_bases_obj = record.alternate_bases();
 
-            if ref_bases_str.len() != 1
-                || alt_bases_obj.len() != 1 
-                || alt_bases_obj.as_ref().len() != 1 // Checks if the first (and only) alternate allele is a single base/string
-                || alt_bases_obj.as_ref().iter().next().map_or(true, |b| b.len() != 1) // Make sure the actual ALT base string is length 1
+            if ref_bases_str.len() != 1          // Reference is not a single base
+                || alt_bases_obj.len() != 1      // Not exactly one alternate allele listed
+                || alt_bases_obj.as_ref().first().map_or(true, |allele_struct| allele_struct.as_ref().len() != 1) // The string of the first (and only) alt allele is not length 1
             {
                 debug!(
                     "Variant at {}:{} (REF:{}, ALT:{}) is not a bi-allelic SNP (single base REF, single base ALT), skipping.",
@@ -411,29 +410,17 @@ mod vcf_processing {
                             break;
                         }
                         match value_option_result {
-                            Ok(Some(vcf::variant::record::samples::series::Value::String(gt_string_cow_opt))) => {
-                                // Value::String is Option<Cow<'a, str>>
-                                if let Some(gt_string_cow) = gt_string_cow_opt {
-                                    let gt_str_slice = gt_string_cow.as_ref();
-                                    if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
-                                        temp_genotypes_for_variant.push(gt_val);
-                                    } else {
-                                        debug!(
-                                            "Variant at {}:{}: GT field (String type) for sample {} was unparsable ('{}'), skipping processing for this variant.",
-                                            record.reference_sequence_name(),
-                                            record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                                            sample_idx,
-                                            gt_str_slice
-                                        );
-                                        has_any_missing_or_unparsable_gt = true;
-                                        break;
-                                    }
-                                } else { // String value was None (e.g. field was present but value was '.', parsed as missing string by series iterator)
-                                     debug!(
-                                        "Variant at {}:{}: GT field (String type) for sample {} was present but missing (None/'.'), skipping processing for this variant.",
+                            Ok(Some(vcf::variant::record::samples::series::Value::String(gt_string_cow_val))) => {
+                                let gt_str_slice = gt_string_cow_val.as_ref(); // gt_string_cow_val is Cow<'a, str>
+                                if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
+                                    temp_genotypes_for_variant.push(gt_val);
+                                } else {
+                                    debug!(
+                                        "Variant at {}:{}: GT field (String type, assumed Cow) for sample {} was unparsable ('{}'), skipping processing for this variant.",
                                         record.reference_sequence_name(),
                                         record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                                        sample_idx
+                                        sample_idx,
+                                        gt_str_slice
                                     );
                                     has_any_missing_or_unparsable_gt = true;
                                     break;
@@ -595,10 +582,15 @@ mod vcf_processing {
             // alt_bases_obj here is AlternateBases which can be iterated.
             // We've already filtered for bi-allelic SNPs where alt_bases_obj.len() == 1
             // and the first alt allele is a single base/string.
-            let alt_allele_str = alt_bases_obj.as_ref().iter().next()
-                .map(|bs| bs.to_string())
-                .unwrap_or_else(|| String::from("N")); // Fallback, though filtering should prevent this for SNPs.
-
+            let alt_allele_str = alt_bases_obj.as_ref() // This is &[alternate_bases::Allele]
+                .first() // This is Option<&alternate_bases::Allele>
+                .map(|allele_struct| allele_struct.as_ref().to_string()) // allele_struct.as_ref() is &str
+                .unwrap_or_else(|| {
+                    // This case should ideally not be reached if the bi-allelic SNP check is correct
+                    // and alt_bases_obj.len() == 1.
+                    warn!("Could not determine alt_allele_str for variant ID construction, defaulting to N. This may indicate an issue with bi-allelic SNP filtering or AlternateBases structure.");
+                    String::from("N")
+                });
             let chrom_str = record.reference_sequence_name().to_string();
             let pos_val = record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
             
