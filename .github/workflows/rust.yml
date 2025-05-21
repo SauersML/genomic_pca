@@ -1,0 +1,100 @@
+name: Rust CI with Samply Profiling
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Define the profiling profile to be used
+  PROFILING_PROFILE: profiling
+  # Define the name for the samply output file
+  SAMPLY_OUTPUT_FILE: profile.json
+  # Define the name for the artifact
+  SAMPLY_ARTIFACT_NAME: samply-profile-json
+
+jobs:
+  build_profile_and_test:
+    name: Build, Profile with Samply, and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        id: install_rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: '' # No extra components needed by default
+
+      - name: Get Rust compiler version
+        id: rust_version
+        run: echo "version=$(rustc --version)" >> $GITHUB_OUTPUT
+
+      # Cache for Cargo's downloaded dependencies
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        id: cache-cargo-deps
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deps-
+
+      # Cache for the build artifacts (target directory)
+      - name: Cache Rust target directory
+        uses: actions/cache@v4
+        id: cache-rust-target
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('**/src/**/*.rs', '**/examples/**/*.rs', '**/tests/**/*.rs', '**/benches/**/*.rs', '**/lib.rs', '**/main.rs', '**/build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-${{ hashFiles('**/Cargo.toml') }}-
+            ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-
+            ${{ runner.os }}-target-
+
+      - name: Install samply
+        run: cargo install samply
+
+      - name: Set perf_event_paranoid
+        run: echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+
+      - name: Build with profiling symbols
+        run: cargo build --verbose --profile ${{ env.PROFILING_PROFILE }}
+
+      - name: Prepare test VCF directory
+        run: |
+          mkdir -p test_vcf_data
+          cp tests/chr22_chunk.vcf.gz test_vcf_data/
+          mkdir -p pca_output_ci # Output directory for genomic_pca
+
+      - name: Run Profiling with Samply
+        run: |
+          samply record \
+            -o ${{ env.SAMPLY_OUTPUT_FILE }} \
+            --save-only \
+            -- \
+            ./target/${{ env.PROFILING_PROFILE }}/genomic_pca \
+            --vcf-dir ./test_vcf_data \
+            --out ./pca_output_ci/chr22_profiled_run \
+            --components 2 \
+            --maf 0.05 \
+            --threads 2 \
+            --log-level Info
+        continue-on-error: true 
+
+      - name: Upload Samply Profile Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SAMPLY_ARTIFACT_NAME }}
+          path: ${{ env.SAMPLY_OUTPUT_FILE }}
+          if-no-files-found: error # Fails the step if the profile.json isn't found
+
+      - name: Run tests (standard build)
+        # Runs all tests with verbose output using the default test profile
+        run: cargo test --verbose
