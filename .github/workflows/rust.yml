@@ -1,4 +1,4 @@
-name: Rust CI with Samply Profiling (Cached)
+name: Rust CI with Samply Profiling
 
 on:
   push:
@@ -11,7 +11,7 @@ env:
   PROFILING_PROFILE: profiling
   SAMPLY_OUTPUT_FILE: profile.json
   SAMPLY_ARTIFACT_NAME: samply-profile-json
-  # Define a version for the cargo bin cache, bump to invalidate
+  PROFILED_BINARY_ARTIFACT_NAME: profiled-genomic-pca-binary
   CARGO_BIN_CACHE_VERSION: v1 
 
 jobs:
@@ -35,7 +35,6 @@ jobs:
       - name: Setup Cargo home
         run: echo "CARGO_HOME=${{ runner.temp }}/.cargo" >> $GITHUB_ENV
 
-      # Cache for ~/.cargo/bin (where samply gets installed)
       - name: Cache Cargo bin directory
         uses: actions/cache@v4
         id: cache-cargo-bin
@@ -45,7 +44,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bin-${{ env.CARGO_BIN_CACHE_VERSION }}-
 
-      # Cache for Cargo's downloaded dependencies (registry, git)
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         id: cache-cargo-deps
@@ -54,12 +52,10 @@ jobs:
             ${{ env.CARGO_HOME }}/registry/index
             ${{ env.CARGO_HOME }}/registry/cache
             ${{ env.CARGO_HOME }}/git/db
-          # Key changes if Cargo.toml changes. No Cargo.lock, so this is the primary trigger for deps.
           key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-deps-
 
-      # Cache for the build artifacts (target directory)
       - name: Cache Rust target directory
         uses: actions/cache@v4
         id: cache-rust-target
@@ -71,10 +67,16 @@ jobs:
             ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-
             ${{ runner.os }}-target-
 
-      - name: Install samply
+      - name: Install samply (if not cached)
         run: |
           echo "${{ env.CARGO_HOME }}/bin" >> $GITHUB_PATH
-          cargo install samply
+          if ! command -v samply &> /dev/null
+          then
+              echo "samply not found, installing..."
+              cargo install samply 
+          else
+              echo "samply found in cache."
+          fi
 
       - name: Verify samply installation
         run: samply --version
@@ -89,9 +91,10 @@ jobs:
         run: |
           mkdir -p test_vcf_data
           cp tests/chr22_chunk.vcf.gz test_vcf_data/
-          mkdir -p pca_output_ci # Output directory for genomic_pca
+          mkdir -p pca_output_ci 
 
       - name: Run Profiling with Samply
+        id: run_samply_profiling
         run: |
           samply record \
             -o ${{ env.SAMPLY_OUTPUT_FILE }} \
@@ -104,14 +107,20 @@ jobs:
             --maf 0.05 \
             --threads 2 \
             --log-level Info
-        continue-on-error: true 
 
-      - name: Upload Samply Profile Artifact
+      - name: Archive profiled binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROFILED_BINARY_ARTIFACT_NAME }}
+          path: ./target/${{ env.PROFILING_PROFILE }}/genomic_pca
+          if-no-files-found: error 
+
+      - name: Upload Samply Profile JSON
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.SAMPLY_ARTIFACT_NAME }}
           path: ${{ env.SAMPLY_OUTPUT_FILE }}
-          if-no-files-found: error
+          if-no-files-found: error 
 
       - name: Run tests (standard build)
         run: cargo test --verbose
