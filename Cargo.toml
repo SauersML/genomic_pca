@@ -7,7 +7,7 @@ description = "A CLI tool for performing PCA on genomic data from VCF files."
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.38", features = ["derive"] }
-efficient_pca = "0.1.5"
+efficient_pca = "0.1.6"
 env_logger = "0.11.8"
 indicatif = "0.17.11"
 log = "0.4.27"
