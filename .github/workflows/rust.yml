@@ -1,4 +1,4 @@
-name: Rust CI with Samply Profiling
+name: Rust CI with Samply Profiling (Cached)
 
 on:
   push:
@@ -8,12 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Define the profiling profile to be used
   PROFILING_PROFILE: profiling
-  # Define the name for the samply output file
   SAMPLY_OUTPUT_FILE: profile.json
-  # Define the name for the artifact
   SAMPLY_ARTIFACT_NAME: samply-profile-json
+  # Define a version for the cargo bin cache, bump to invalidate
+  CARGO_BIN_CACHE_VERSION: v1 
 
 jobs:
   build_profile_and_test:
@@ -27,21 +26,35 @@ jobs:
         id: install_rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: '' # No extra components needed by default
+          components: ''
 
       - name: Get Rust compiler version
         id: rust_version
         run: echo "version=$(rustc --version)" >> $GITHUB_OUTPUT
 
-      # Cache for Cargo's downloaded dependencies
+      - name: Setup Cargo home
+        run: echo "CARGO_HOME=${{ runner.temp }}/.cargo" >> $GITHUB_ENV
+
+      # Cache for ~/.cargo/bin (where samply gets installed)
+      - name: Cache Cargo bin directory
+        uses: actions/cache@v4
+        id: cache-cargo-bin
+        with:
+          path: ${{ env.CARGO_HOME }}/bin 
+          key: ${{ runner.os }}-cargo-bin-${{ env.CARGO_BIN_CACHE_VERSION }}-${{ steps.rust_version.outputs.version }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bin-${{ env.CARGO_BIN_CACHE_VERSION }}-
+
+      # Cache for Cargo's downloaded dependencies (registry, git)
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         id: cache-cargo-deps
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          # Key changes if Cargo.toml changes. No Cargo.lock, so this is the primary trigger for deps.
           key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-deps-
@@ -59,7 +72,12 @@ jobs:
             ${{ runner.os }}-target-
 
       - name: Install samply
-        run: cargo install samply
+        run: |
+          echo "${{ env.CARGO_HOME }}/bin" >> $GITHUB_PATH
+          cargo install samply
+
+      - name: Verify samply installation
+        run: samply --version
 
       - name: Set perf_event_paranoid
         run: echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
@@ -93,8 +111,7 @@ jobs:
         with:
           name: ${{ env.SAMPLY_ARTIFACT_NAME }}
           path: ${{ env.SAMPLY_OUTPUT_FILE }}
-          if-no-files-found: error # Fails the step if the profile.json isn't found
+          if-no-files-found: error
 
       - name: Run tests (standard build)
-        # Runs all tests with verbose output using the default test profile
         run: cargo test --verbose
