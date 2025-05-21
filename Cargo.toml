@@ -3,6 +3,24 @@ name = "genomic_pca"
 version = "0.0.1"
 edition = "2021"
 description = "A CLI tool for performing PCA on genomic data from VCF files."
+license = "MIT"
+repository = "https://github.com/SauersML/genomic_pca"
+readme = "README.md"
+keywords = [
+    "pca",
+    "genomics",
+    "svd",
+    "bioinformatics",
+    "machine-learning",
+]
+categories = [
+    "algorithms",
+    "mathematics",
+    "science",
+    "science::bioinformatics",
+    "science::bioinformatics::genomics",
+]
+documentation = "https://github.com/SauersML/genomic_pca"
 
 [dependencies]
 anyhow = "1.0.98"
