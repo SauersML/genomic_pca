@@ -378,9 +378,9 @@ mod vcf_processing {
             let ref_bases_str = record.reference_bases();
             let alt_bases_obj = record.alternate_bases();
 
-            if ref_bases_str.len() != 1          // Reference is not a single base
-                || alt_bases_obj.len() != 1      // Not exactly one alternate allele listed
-                || alt_bases_obj.as_ref().first().map_or(true, |allele_struct| allele_struct.as_ref().len() != 1) // The string of the first (and only) alt allele is not length 1
+            if ref_bases_str.len() != 1      // Check if the reference allele is a single character.
+                || alt_bases_obj.len() != 1            // Check if there is exactly one alternate allele. (e.g., not "A,G")
+                || alt_bases_obj.as_ref().len() != 1       // If one ALT, check if its string representation is a single char (e.g., "A", not "<DEL>").
             {
                 debug!(
                     "Variant at {}:{} (REF:{}, ALT:{}) is not a bi-allelic SNP (single base REF, single base ALT), skipping.",
@@ -582,15 +582,12 @@ mod vcf_processing {
             // alt_bases_obj here is AlternateBases which can be iterated.
             // We've already filtered for bi-allelic SNPs where alt_bases_obj.len() == 1
             // and the first alt allele is a single base/string.
-            let alt_allele_str = alt_bases_obj.as_ref() // This is &[alternate_bases::Allele]
-                .first() // This is Option<&alternate_bases::Allele>
-                .map(|allele_struct| allele_struct.as_ref().to_string()) // allele_struct.as_ref() is &str
-                .unwrap_or_else(|| {
-                    // This case should ideally not be reached if the bi-allelic SNP check is correct
-                    // and alt_bases_obj.len() == 1.
-                    warn!("Could not determine alt_allele_str for variant ID construction, defaulting to N. This may indicate an issue with bi-allelic SNP filtering or AlternateBases structure.");
-                    String::from("N")
-                });
+            // The preceding bi-allelic SNP check means:
+            // 1. ref_bases_str.len() == 1
+            // 2. alt_bases_obj.len() == 1 (meaning there's only one alternate allele)
+            // 3. alt_bases_obj.as_ref().len() == 1 (meaning the string of that one alternate allele is a single character)
+            // Therefore, alt_bases_obj.as_ref() IS the single-character alternate allele string.
+            let alt_allele_str = alt_bases_obj.as_ref().to_string();
             let chrom_str = record.reference_sequence_name().to_string();
             let pos_val = record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
             
