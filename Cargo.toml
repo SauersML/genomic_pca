@@ -27,3 +27,4 @@ opt-level = 3
 inherits = "release" # Inherit settings from the release profile
 debug = true         # Enable debug symbols
 strip = false        # Do not strip symbols
+lto = false
