@@ -1,6 +1,6 @@
 [package]
 name = "genomic_pca"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "A CLI tool for performing PCA on genomic data from VCF files."
 license = "MIT"
@@ -25,7 +25,7 @@ documentation = "https://github.com/SauersML/genomic_pca"
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.38", features = ["derive"] }
-efficient_pca = "0.1.6"
+efficient_pca = "0.1.7"
 env_logger = "0.11.8"
 indicatif = "0.17.11"
 log = "0.4.27"
@@ -33,6 +33,8 @@ ndarray = "0.16.1"
 noodles-vcf = "0.78.0"
 num_cpus = "1.16.0"
 rayon = "1.10.0"
+
+ndarray-linalg = { version = "0.17.0", default-features = false, features = ["openblas-static"] }
 
 [profile.release]
 lto = true
@@ -45,4 +47,3 @@ opt-level = 3
 inherits = "release" # Inherit settings from the release profile
 debug = true         # Enable debug symbols
 strip = false        # Do not strip symbols
-lto = false
