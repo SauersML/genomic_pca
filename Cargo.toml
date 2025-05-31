@@ -23,33 +23,21 @@ categories = [
 documentation = "https://github.com/SauersML/genomic_pca"
 
 [dependencies]
-anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-url = "=2.4.1" # Pinned to avoid newer ICU versions
-efficient_pca = "=0.1.6" # Pinned to use bincode 1.3.3
-env_logger = "0.11"
-indicatif = "0.17"
-log = "0.4"
-ndarray = "0.16"
-noodles-vcf = "0.78"
-num_cpus = "1.17"
-rayon = "1.10"
-bed-reader = "1.0"
-statrs = "0.18"
-icu_collections = "=1.4.0"
-icu_normalizer = "=1.4.0"
-icu_normalizer_data = "=1.4.0"
-icu_properties = "=1.4.0"
-icu_properties_data = "=1.4.0"
-icu_provider = "=1.4.0"
-writeable = "0.5"
-yoke = "0.7"
-potential_utf = "=0.1.0" # Pinned for Rust 1.75.0 compatibility
-noodles-tabix = "=0.40.0" # Pin for older noodles-bgzf via noodles-vcf
-native-tls = "=0.2.11" # Pinned for Rust 1.75.0 compatibility
-zerofrom = "0.1"
-bincode = "=1.3.3" # Pinned to be compatible with Rust 1.75.0
-ndarray-linalg = { version = "0.17", default-features = false, features = ["openblas-static"] }
+anyhow = "1.0.98"
+clap = { version = "4.5.38", features = ["derive"] }
+efficient_pca = "0.1.7"
+env_logger = "0.11.8"
+indicatif = "0.17.11"
+log = "0.4.27"
+ndarray = "0.16.1"
+noodles-vcf = "0.78.0"
+num_cpus = "1.16.0"
+rayon = "1.10.0"
+bed_reader = "1.0.6"
+statrs = "0.18.0"
+url = "2.5.4"
+
+ndarray-linalg = { version = "0.17.0", default-features = false, features = ["openblas-static"] }
 
 [profile.release]
 lto = true
@@ -59,6 +47,6 @@ strip = true
 opt-level = 3
 
 [profile.profiling]
-inherits = "release"
-debug = true
-strip = false
+inherits = "release" # Inherit settings from the release profile
+debug = true         # Enable debug symbols
+strip = false        # Do not strip symbols
