@@ -1,5 +1,7 @@
 // main.rs
 
+mod prepare;
+
 // --- External Crate Imports ---
 use anyhow::{anyhow, Error, Result};
 use clap::Parser;
