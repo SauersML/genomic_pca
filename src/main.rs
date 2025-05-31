@@ -325,7 +325,7 @@ mod pca_runner {
         let seed = cli_args.rfit_seed;
         // `tolerance_rfit` is set to None, meaning rfit uses its default behavior.
         let tolerance_rfit = None;
-
+        
         let data_for_transform = genotype_matrix.clone(); // Clone for transform call
 
         info!(
@@ -342,7 +342,7 @@ mod pca_runner {
                 tolerance_rfit,
             )
             .map_err(|e| anyhow!("PCA computation with rfit failed: {}", e.to_string()))?;
-
+            
         // Now, call transform to get the principal component scores
         let transformed_pcs = pca_model.transform(data_for_transform)
             .map_err(|e| anyhow!("PCA transformation failed after rfit: {}", e.to_string()))?;
