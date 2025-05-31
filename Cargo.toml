@@ -33,6 +33,7 @@ ndarray = "0.16.1"
 noodles-vcf = "0.78.0"
 num_cpus = "1.16.0"
 rayon = "1.10.0"
+bed_reader = "1.0.6"
 
 ndarray-linalg = { version = "0.17.0", default-features = false, features = ["openblas-static"] }
 
