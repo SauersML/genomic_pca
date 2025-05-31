@@ -291,7 +291,7 @@ impl MicroarrayDataPreparer {
         final_qc_snps_details_list: &[IntermediateSnpDetails], // Length D_final
     ) -> Result<(Vec<LdBlockSpecification>, Vec<usize>, Array1<f32>, Array1<f32>, usize), ThreadSafeStdError> {
         info!("Phase 0.6: Mapping {} final QC'd SNPs to LD blocks from '{}'...", final_qc_snps_details_list.len(), self.config.ld_block_file_path);
-        let parsed_ld_blocks = self.parse_ld_block_file_robustly()?;
+        let parsed_ld_blocks = self.parse_ld_block_file()?;
 
         let mut block_tag_to_original_m_indices: HashMap<String, Vec<usize>> = HashMap::new();
         let mut d_blocked_snp_original_m_indices_set: HashSet<usize> = HashSet::new();
@@ -299,7 +299,7 @@ impl MicroarrayDataPreparer {
         for snp_details in final_qc_snps_details_list {
             let normalized_snp_chromosome = Self::normalize_chromosome_name(&snp_details.chromosome);
             for (block_chr, block_start, block_end, block_tag) in &parsed_ld_blocks {
-                // block_chr is already normalized from parse_ld_block_file_robustly
+                // block_chr is already normalized from parse_ld_block_file
                 if &normalized_snp_chromosome == block_chr &&
                    snp_details.bp_position >= *block_start &&
                    snp_details.bp_position <= *block_end {
