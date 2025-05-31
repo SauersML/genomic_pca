@@ -208,7 +208,8 @@ impl MicroarrayDataPreparer {
         info!("Phase 0.3 & 0.4: SNP QC & Standardization Params for {} samples...", num_qc_samples);
         if num_qc_samples == 0 { return Ok((Vec::new(), 0)); }
 
-        let par_results: Vec<Option<IntermediateSnpDetails>> = (0..self.initial_snp_count_from_bim)
+        // The filter_map itself unwraps Some and filters out None, so the collected Vec contains IntermediateSnpDetails directly.
+        let par_results: Vec<IntermediateSnpDetails> = (0..self.initial_snp_count_from_bim)
             .into_par_iter()
             .filter_map(|original_m_idx| {
                 let mut thread_bed = match Bed::new(&self.config.bed_file_path) {
