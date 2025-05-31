@@ -1,158 +1,53 @@
-name: Rust CI with Samply Profiling
+name: Generate getdoc Report
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
+    if: "!contains(github.event.head_commit.message, 'Merge pull request #')"
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  PROFILING_PROFILE: profiling
-  SAMPLY_OUTPUT_FILE: profile.json
-  SAMPLY_ARTIFACT_NAME: samply-profile-json
-  PROFILED_BINARY_ARTIFACT_NAME: profiled-genomic-pca-binary
-  CARGO_BIN_CACHE_VERSION: v1
+
+permissions:
+  contents: read # Assuming read is sufficient for getdoc and checkout
 
 jobs:
-  build_profile_and_test:
-    name: Build, Profile with Samply, and Test
+  generate_getdoc_report:
+    name: Generate getdoc Report
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        id: install_rust
-        uses: dtolnay/rust-toolchain@stable
+        id: install_rust # Keep id if other steps might use it, otherwise optional
+        uses: dtolnay/rust-toolchain@stable # Keeping stable as per plan
         with:
-          components: ''
+          components: rustfmt, clippy # Adding components that might be useful for getdoc
 
-      - name: Get Rust compiler version
-        id: rust_version
-        run: echo "version=$(rustc --version)" >> $GITHUB_OUTPUT
-
-      - name: Setup Cargo home
-        run: echo "CARGO_HOME=${{ runner.temp }}/.cargo" >> $GITHUB_ENV
-
-      - name: Cache Cargo bin directory
-        uses: actions/cache@v4
-        id: cache-cargo-bin
-        with:
-          path: ${{ env.CARGO_HOME }}/bin
-          key: ${{ runner.os }}-cargo-bin-${{ env.CARGO_BIN_CACHE_VERSION }}-${{ steps.rust_version.outputs.version }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-bin-${{ env.CARGO_BIN_CACHE_VERSION }}-
-
+      # Keep general cargo caching for registry/git
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         id: cache-cargo-deps
         with:
           path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          # Using existing key from rust.yml, assuming Cargo.lock is still relevant for getdoc's deps
           key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-deps-
 
-      - name: Cache Rust target directory
-        uses: actions/cache@v4
-        id: cache-rust-target
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-${{ hashFiles('**/Cargo.toml') }}-${{ hashFiles('**/src/**/*.rs', '**/examples/**/*.rs', '**/tests/**/*.rs', '**/benches/**/*.rs', '**/lib.rs', '**/main.rs', '**/build.rs') }}
-          restore-keys: |
-            ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-${{ hashFiles('**/Cargo.toml') }}-
-            ${{ runner.os }}-target-${{ steps.rust_version.outputs.version }}-${{ env.PROFILING_PROFILE }}-
-            ${{ runner.os }}-target-
-
-      - name: Ensure samply is installed and in PATH
-        shell: bash
-        run: |
-          TARGET_CARGO_BIN_DIR="${{ env.CARGO_HOME }}/bin"
-          echo "$TARGET_CARGO_BIN_DIR" >> $GITHUB_PATH
-          export CARGO_HOME="${{ env.CARGO_HOME }}"
-
-          if [ -x "$TARGET_CARGO_BIN_DIR/samply" ]; then
-            echo "samply found and executable in $TARGET_CARGO_BIN_DIR (likely from cache)."
-          else
-            echo "samply not found or not executable in $TARGET_CARGO_BIN_DIR. Installing..."
-            cargo install samply
-          fi
-
-      - name: Verify samply installation
-        run: samply --version
-
-      - name: Set perf_event_paranoid
-        run: echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
-
-      - name: Build with profiling symbols
-        run: cargo build --verbose --profile ${{ env.PROFILING_PROFILE }}
-
-      - name: Prepare test VCF directory
-        run: |
-          mkdir -p test_vcf_data
-          cp tests/chr22_chunk.vcf.gz test_vcf_data/
-          mkdir -p pca_output_ci
-
-      - name: Run Profiling with Samply
-        id: run_samply_profiling
-        run: |
-          samply record \
-            -o ${{ env.SAMPLY_OUTPUT_FILE }} \
-            --save-only \
-            -- \
-            ./target/${{ env.PROFILING_PROFILE }}/genomic_pca \
-            --vcf-dir ./test_vcf_data \
-            --out ./pca_output_ci/chr22_profiled_run \
-            --components 2 \
-            --maf 0.05 \
-            --threads 2 \
-            --log-level Info
-
-      - name: Archive profiled binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.PROFILED_BINARY_ARTIFACT_NAME }}
-          path: ./target/${{ env.PROFILING_PROFILE }}/genomic_pca
-          if-no-files-found: error
-
-      - name: Upload Samply Profile JSON
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.SAMPLY_ARTIFACT_NAME }}
-          path: ${{ env.SAMPLY_OUTPUT_FILE }}
-          if-no-files-found: error
-
-      - name: Run tests (standard build)
-        run: cargo test --verbose
-
-  generate_documentation_report:
-    name: Generate Documentation Report
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly # As per original plan for getdoc workflow
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Cargo global directories (registry, git DBs)
-        uses: actions/cache@v4
-        id: cache-cargo-global-docs # Unique id for this job's cache step
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-global-${{ hashFiles('**/Cargo.lock') }} # Can reuse key if content is same
-          restore-keys: |
-            ${{ runner.os }}-cargo-global-
-
-      - name: Output Cache Info
-        run: echo "Docs job - Cargo global cache hit: ${{ steps.cache-cargo-global-docs.outputs.cache-hit }}"
+      - name: Output Cargo Dependencies Cache Info
+        run: echo "Cargo dependencies cache hit: ${{ steps.cache-cargo-deps.outputs.cache-hit }}"
 
       - name: Install getdoc
         run: cargo install getdoc --locked
