@@ -33,7 +33,7 @@ ndarray = "0.16.1"
 noodles-vcf = "0.78.0"
 num_cpus = "1.16.0"
 rayon = "1.10.0"
-bed_reader = "1.0.6"
+bed-reader = "1.0.6"
 statrs = "0.18.0"
 url = "2.5.4"
 
