@@ -20,18 +20,15 @@ use std::{
 };
 
 
-mod vcf_processing {
+pub mod vcf_processing {
     use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, VcfRecord}; // Added VcfRecord, ensured cli is not present
     // Removed local noodles_vcf import block that was here
-    use noodles_vcf::record::{ // Added new imports
-        AlternateBases,
-        Samples,
-        samples::{
-            keys::Key as GenotypeKey,
-            Series as VcfSeries,
-            Value as GenotypeValue,
-        }
-    };
+    use noodles_vcf::record::{AlternateBases, Samples};
+    use noodles_vcf::record::samples::{Keys as NoodlesKeys, Series as VcfSeries};
+    use noodles_vcf::variant::record::samples::series::Value as GenotypeValue;
+    use noodles_vcf::record::samples; // Explicitly import for `samples::` paths if needed
+    use noodles_vcf::variant::record::AlternateBases as _; // Use _ to import trait methods
+    use noodles_vcf::variant::record::samples::Series as SeriesTrait; // For explicit trait method calls
 
     #[derive(Debug)]
     pub struct SamplesHeaderInfo {
@@ -85,7 +82,7 @@ mod vcf_processing {
         first_vcf_path_for_error_msg: &Path,
     ) -> Result<Option<Vec<VariantGenotypeData>>> {
         debug!("Processing VCF: {}", vcf_path.display());
-        let mut reader = noodles_vcf::reader::Builder::default().build_from_path(vcf_path)?; // Changed to noodles_vcf::reader
+        let mut reader = noodles_vcf::io::reader::Builder::default().build_from_path(vcf_path)?; // Changed to noodles_vcf::reader
         let current_header = reader.read_header()?;
 
         if current_header.sample_names().len() != canonical_samples_info.sample_count
@@ -104,7 +101,7 @@ mod vcf_processing {
             ));
         }
         
-        let gt_key_str = GenotypeKey::Genotype.as_ref(); // Changed to GenotypeKey
+        let gt_key_str = "GT"; // Changed to GenotypeKey
 
         if !current_header.formats().contains_key(gt_key_str) {
             return Err(anyhow!(
@@ -144,7 +141,7 @@ mod vcf_processing {
 
             match samples_obj.select(gt_key_str) {
                 Some(gt_series_struct) => {
-                    for (sample_idx, value_option_result) in gt_series_struct.iter(&current_header).enumerate() {
+                    for (sample_idx, value_option_result) in <noodles_vcf::record::samples::Series as SeriesTrait>::iter(&gt_series_struct, &current_header).enumerate() {
                         if sample_idx >= canonical_samples_info.sample_count {
                             warn!("More GT values in series than expected samples for variant at {}:{}. VCF: {}. Truncating.",
                                 record.reference_sequence_name(),
@@ -280,7 +277,7 @@ mod vcf_processing {
                 continue;
             }
             
-            let alt_allele_str = alt_bases_obj.to_string(); // Removed .as_ref()
+            let alt_allele_str = alt_bases_obj.as_ref().to_string(); // Removed .as_ref()
             let chrom_str = record.reference_sequence_name().to_string();
             let pos_val = record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
             
@@ -303,7 +300,7 @@ mod vcf_processing {
     }
 }
 
-mod matrix_ops {
+pub mod matrix_ops {
     use super::{anyhow, Result, Array2};
     use super::vcf_processing::VariantGenotypeData;
 

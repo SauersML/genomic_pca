@@ -1,0 +1,65 @@
+name: Documentation Generator
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    if: "!contains(github.event.head_commit.message, 'Merge pull request #')"
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  generate_doc_report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo global directories (registry, git DBs)
+        uses: actions/cache@v4
+        id: cache-cargo-global # Added id for potential future use or debugging
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-global-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-global-
+        # Adding a verbose output to confirm cache hit/miss as per user feedback for "Print outputs"
+      - name: Output Cache Info
+        run: echo "Cargo global cache hit: ${{ steps.cache-cargo-global.outputs.cache-hit }}"
+
+      - name: Install getdoc
+        run: cargo install getdoc --locked
+
+      - name: Run getdoc
+        run: getdoc
+
+      - name: Display report.md
+        run: |
+          echo "Checking for report.md..."
+          ls -al report.md || echo "report.md not found."
+          echo "" # Add a newline for better readability before catting
+          if [ -f report.md ]; then
+            echo "Contents of report.md:"
+            cat report.md
+          else
+            echo "report.md was not generated, so it cannot be displayed."
+            # Consider if this should be exit 1. For now, just reporting.
+            # exit 1
+          fi

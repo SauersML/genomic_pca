@@ -2,6 +2,8 @@
 
 mod prepare;
 mod vcf;
+use crate::vcf::vcf_processing;
+use crate::vcf::matrix_ops;
 
 // --- External Crate Imports ---
 use anyhow::{anyhow, Error, Result};
@@ -88,7 +90,7 @@ fn main() -> Result<(), Error> {
 
     let first_vcf_path = &vcf_files[0];
     info!("Reading header from first VCF: {}", first_vcf_path.display());
-    let mut first_reader = noodles_vcf::reader::Builder::default().build_from_path(first_vcf_path)?;
+    let mut first_reader = noodles_vcf::io::reader::Builder::default().build_from_path(first_vcf_path)?;
     let header_template = Arc::new(first_reader.read_header()?); // Used for sample name consistency
     let samples_info = Arc::new(vcf_processing::SamplesHeaderInfo::from_header(
         &header_template,
