@@ -2,6 +2,8 @@
 
 mod prepare;
 mod vcf;
+use crate::vcf::vcf_processing;
+use crate::vcf::matrix_ops;
 
 // --- External Crate Imports ---
 use anyhow::{anyhow, Error, Result};

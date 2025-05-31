@@ -23,14 +23,10 @@ use std::{
 pub mod vcf_processing {
     use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, VcfRecord}; // Added VcfRecord, ensured cli is not present
     // Removed local noodles_vcf import block that was here
-    use noodles_vcf::record::{ // Added new imports
-        AlternateBases,
-        Samples,
-        samples::{
-            self, variant::record::samples::series::Value as GenotypeValue, Keys as NoodlesKeys,
-            Series as VcfSeries,
-        }
-    };
+    use noodles_vcf::record::{AlternateBases, Samples};
+    use noodles_vcf::record::samples::{Keys as NoodlesKeys, Series as VcfSeries};
+    use noodles_vcf::variant::record::samples::series::Value as GenotypeValue;
+    use noodles_vcf::record::samples; // Explicitly import for `samples::` paths if needed
     use noodles_vcf::variant::record::AlternateBases as _; // Use _ to import trait methods
     use noodles_vcf::variant::record::samples::Series as SeriesTrait; // For explicit trait method calls
 
