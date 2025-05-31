@@ -1,7 +1,6 @@
-use ndarray::{s, Array1, Array2, Axis, ArrayView1, Ix2};
+use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::error::Error;
 use log::{info, debug, warn, error};
@@ -185,7 +184,7 @@ impl MicroarrayDataPreparer {
 
     fn perform_sample_qc(&self) -> Result<(Vec<isize>, usize), ThreadSafeStdError> {
         info!("Phase 0.2: Performing sample QC using {} initial samples...", self.initial_sample_count_from_fam);
-        let qc_sample_original_indices = if let Some(ref path) = self.config.sample_ids_to_keep_file_path {
+        let qc_sample_original_indices: Vec<isize> = if let Some(ref path) = self.config.sample_ids_to_keep_file_path {
             info!("Reading sample list to keep from: {}", path);
             let file_content = std::fs::read_to_string(path).map_err(DataPrepError::from)?;
             let ids_to_keep_set: HashSet<String> = file_content.lines().map(String::from).collect();
@@ -498,9 +497,9 @@ impl MicroarrayDataPreparer {
     
         // Term for homozygous Allele 2
         if chi_squared_statistic.is_finite() {
-            if expected_homozygous_allele2_count > MIN_EXPECTED_FOR_DIVISION {
+            if expected_homozygous_allele2 > MIN_EXPECTED_FOR_DIVISION {
                 chi_squared_statistic += (observed_homozygous_allele2_count - expected_homozygous_allele2).powi(2)
-                    / expected_homozygous_allele2_count;
+                    / expected_homozygous_allele2;
             } else if observed_homozygous_allele2_count > MIN_EXPECTED_FOR_DIVISION {
                 chi_squared_statistic = f64::INFINITY;
             }
