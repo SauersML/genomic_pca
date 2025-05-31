@@ -105,7 +105,7 @@ pub struct MicroarrayDataPreparerConfig {
     pub sample_ids_to_keep_file_path: Option<String>,
     pub min_snp_call_rate_threshold: f64,
     pub min_snp_maf_threshold: f64,
-    pub max_snp_hwe_p_value_threshold: f64, // SNPs with p-value <= this are REMOVED
+    pub max_snp_hwe_p_value_threshold: f64,
 }
 
 pub struct MicroarrayDataPreparer {
@@ -207,9 +207,7 @@ impl MicroarrayDataPreparer {
     ) -> Result<(Vec<IntermediateSnpDetails>, usize), ThreadSafeStdError> {
         info!("Phase 0.3 & 0.4: SNP QC & Standardization Params for {} samples...", num_qc_samples);
         if num_qc_samples == 0 { return Ok((Vec::new(), 0)); }
-
-        // The filter_map itself unwraps Some and filters out None, so the collected Vec contains IntermediateSnpDetails directly.
-        let par_results: Vec<IntermediateSnpDetails> = (0..self.initial_snp_count_from_bim)
+        let final_qc_snps_details: Vec<IntermediateSnpDetails> = (0..self.initial_snp_count_from_bim)
             .into_par_iter()
             .filter_map(|original_m_idx| {
                 let mut thread_bed = match Bed::new(&self.config.bed_file_path) {
@@ -280,7 +278,6 @@ impl MicroarrayDataPreparer {
                 })
             }).collect();
 
-        let final_qc_snps_details: Vec<IntermediateSnpDetails> = par_results.into_iter().flatten().collect();
         let num_final_qc_snps = final_qc_snps_details.len();
         info!("SNP QC & Stats: {} / {} initial SNPs passed all filters.", num_final_qc_snps, self.initial_snp_count_from_bim);
         Ok((final_qc_snps_details, num_final_qc_snps))
