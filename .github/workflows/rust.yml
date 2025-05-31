@@ -127,3 +127,38 @@ jobs:
 
       - name: Run tests (standard build)
         run: cargo test --verbose
+
+  generate_documentation_report:
+    name: Generate Documentation Report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly # As per original plan for getdoc workflow
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo global directories (registry, git DBs)
+        uses: actions/cache@v4
+        id: cache-cargo-global-docs # Unique id for this job's cache step
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-global-${{ hashFiles('**/Cargo.lock') }} # Can reuse key if content is same
+          restore-keys: |
+            ${{ runner.os }}-cargo-global-
+
+      - name: Output Cache Info
+        run: echo "Docs job - Cargo global cache hit: ${{ steps.cache-cargo-global-docs.outputs.cache-hit }}"
+
+      - name: Install getdoc
+        run: cargo install getdoc --locked
+
+      - name: Run getdoc
+        run: getdoc
+
+      - name: Display report.md
+        run: cat report.md
