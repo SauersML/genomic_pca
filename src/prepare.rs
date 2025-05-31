@@ -297,8 +297,10 @@ impl MicroarrayDataPreparer {
         let mut d_blocked_snp_original_m_indices_set: HashSet<usize> = HashSet::new();
 
         for snp_details in final_qc_snps_details_list {
+            let normalized_snp_chromosome = Self::normalize_chromosome_name(&snp_details.chromosome);
             for (block_chr, block_start, block_end, block_tag) in &parsed_ld_blocks {
-                if &snp_details.chromosome == block_chr &&
+                // block_chr is already normalized from parse_ld_block_file_robustly
+                if &normalized_snp_chromosome == block_chr &&
                    snp_details.bp_position >= *block_start &&
                    snp_details.bp_position <= *block_end {
                     block_tag_to_original_m_indices.entry(block_tag.clone()).or_default().push(snp_details.original_m_idx);
@@ -379,9 +381,8 @@ impl MicroarrayDataPreparer {
                 warn!("Skipping malformed LD block line {}: '{}' (expected at least 4 fields: chr start end id)", line_num + 1, line);
                 continue;
             }
-            let chr_str = parts[0].to_string();
-            // Handle "chrX", "chrY", "chrMT" etc for chromosome, or they are numeric if PLINK standard is numeric.
-            // For now, assume they can be strings.
+            let chr_str_original = parts[0];
+            let chr_str = Self::normalize_chromosome_name(chr_str_original);
             let start_pos = parts[1].parse::<i32>().map_err(|e| DataPrepError::from(format!("LD block line {}: Error parsing start pos '{}': {}", line_num + 1, parts[1], e)))?;
             let end_pos = parts[2].parse::<i32>().map_err(|e| DataPrepError::from(format!("LD block line {}: Error parsing end pos '{}': {}", line_num + 1, parts[2], e)))?;
             let block_id_str = parts[3].to_string();
@@ -390,6 +391,15 @@ impl MicroarrayDataPreparer {
         if blocks.is_empty() { warn!("No valid LD blocks parsed from file: {}. Make sure format is chr start end block_id (whitespace separated).", self.config.ld_block_file_path); }
         else { info!("Successfully parsed {} LD blocks from file.", blocks.len()); }
         Ok(blocks)
+    }
+
+    /// Normalizes chromosome names to a consistent format (removes "chr" prefix).
+    fn normalize_chromosome_name(original_name: &str) -> String {
+        let mut name = original_name.to_lowercase();
+        if name.starts_with("chr") {
+            name = name.trim_start_matches("chr").to_string();
+        }
+        name
     }
     
     /// Calculates the p-value for Hardy-Weinberg Equilibrium using a Chi-squared test.
