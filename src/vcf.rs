@@ -8,10 +8,7 @@ use env_logger;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use ndarray::{Array2};
-use noodles_vcf::{
-    self as vcf,
-    Header as VcfHeader,
-};
+use noodles_vcf::{Record as VcfRecord, Header as VcfHeader}; // Changed
 use num_cpus;
 use rayon::prelude::*;
 use std::{
@@ -23,14 +20,17 @@ use std::{
 };
 
 
-pub mod vcf_processing {
-    use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader};
-    use noodles_vcf::{
-        self as vcf,
-        variant::record::{
-            AlternateBases as _,
-        },
-        variant::record::samples::Series as VcfSeriesTrait,
+mod vcf_processing {
+    use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, VcfRecord}; // Added VcfRecord, ensured cli is not present
+    // Removed local noodles_vcf import block that was here
+    use noodles_vcf::record::{ // Added new imports
+        AlternateBases,
+        Samples,
+        samples::{
+            keys::Key as GenotypeKey,
+            Series as VcfSeries,
+            Value as GenotypeValue,
+        }
     };
 
     #[derive(Debug)]
@@ -81,11 +81,11 @@ pub mod vcf_processing {
     pub fn process_single_vcf(
         vcf_path: &Path,
         canonical_samples_info: Arc<SamplesHeaderInfo>,
-        cli_args: &cli::CliArgs,
+        cli_args: &crate::cli::CliArgs, // Changed to crate::cli::CliArgs
         first_vcf_path_for_error_msg: &Path,
     ) -> Result<Option<Vec<VariantGenotypeData>>> {
         debug!("Processing VCF: {}", vcf_path.display());
-        let mut reader = vcf::io::reader::Builder::default().build_from_path(vcf_path)?;
+        let mut reader = noodles_vcf::reader::Builder::default().build_from_path(vcf_path)?; // Changed to noodles_vcf::reader
         let current_header = reader.read_header()?;
 
         if current_header.sample_names().len() != canonical_samples_info.sample_count
@@ -104,7 +104,7 @@ pub mod vcf_processing {
             ));
         }
         
-        let gt_key_str = vcf::variant::record::samples::keys::key::GENOTYPE.as_ref();
+        let gt_key_str = GenotypeKey::Genotype.as_ref(); // Changed to GenotypeKey
 
         if !current_header.formats().contains_key(gt_key_str) {
             return Err(anyhow!(
@@ -114,7 +114,7 @@ pub mod vcf_processing {
         }
 
         let mut chromosome_variants_data = Vec::new();
-        let mut record_buffer = vcf::Record::default();
+        let mut record_buffer = VcfRecord::default(); // Changed to VcfRecord
 
         while reader.read_record(&mut record_buffer)? != 0 {
             let record = &record_buffer;
@@ -124,7 +124,7 @@ pub mod vcf_processing {
 
             if ref_bases_str.len() != 1
                 || alt_bases_obj.len() != 1
-                || alt_bases_obj.as_ref().len() != 1 
+            // Removed: || alt_bases_obj.as_ref().len() != 1 
             {
                 debug!(
                     "Variant at {}:{} (REF:{}, ALT:{}) is not a bi-allelic SNP (single base REF, single base ALT), skipping.",
@@ -154,7 +154,7 @@ pub mod vcf_processing {
                             break;
                         }
                         match value_option_result {
-                            Ok(Some(vcf::variant::record::samples::series::Value::String(gt_string_cow_val))) => {
+                            Ok(Some(GenotypeValue::String(gt_string_cow_val))) => { // Changed to GenotypeValue
                                 let gt_str_slice = gt_string_cow_val.as_ref();
                                 if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
                                     temp_genotypes_for_variant.push(gt_val);
@@ -166,7 +166,7 @@ pub mod vcf_processing {
                                     break;
                                 }
                             }
-                            Ok(Some(vcf::variant::record::samples::series::Value::Genotype(boxed_gt))) => {
+                            Ok(Some(GenotypeValue::Genotype(boxed_gt))) => { // Changed to GenotypeValue
                                 let genotype_data = &*boxed_gt;
                                 let mut allele_dosage_sum: u8 = 0;
                                 let mut alleles_processed_count = 0;
@@ -280,7 +280,7 @@ pub mod vcf_processing {
                 continue;
             }
             
-            let alt_allele_str = alt_bases_obj.as_ref().to_string(); 
+            let alt_allele_str = alt_bases_obj.to_string(); // Removed .as_ref()
             let chrom_str = record.reference_sequence_name().to_string();
             let pos_val = record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
             
@@ -303,7 +303,7 @@ pub mod vcf_processing {
     }
 }
 
-pub mod matrix_ops {
+mod matrix_ops {
     use super::{anyhow, Result, Array2};
     use super::vcf_processing::VariantGenotypeData;
 

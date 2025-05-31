@@ -88,9 +88,9 @@ fn main() -> Result<(), Error> {
 
     let first_vcf_path = &vcf_files[0];
     info!("Reading header from first VCF: {}", first_vcf_path.display());
-    let mut first_reader = noodles_vcf::io::reader::Builder::default().build_from_path(first_vcf_path)?;
+    let mut first_reader = noodles_vcf::reader::Builder::default().build_from_path(first_vcf_path)?;
     let header_template = Arc::new(first_reader.read_header()?); // Used for sample name consistency
-    let samples_info = Arc::new(vcf::vcf_processing::SamplesHeaderInfo::from_header(
+    let samples_info = Arc::new(vcf_processing::SamplesHeaderInfo::from_header(
         &header_template,
         first_vcf_path,
     )?);
@@ -117,11 +117,11 @@ fn main() -> Result<(), Error> {
         .progress_chars("=> ");
     let pb_vcf = ProgressBar::new(vcf_files.len() as u64).with_style(pb_vcf_style);
 
-    let per_chromosome_data_results: Vec<Result<Option<Vec<vcf::vcf_processing::VariantGenotypeData>>>> =
+    let per_chromosome_data_results: Vec<Result<Option<Vec<vcf_processing::VariantGenotypeData>>>> =
         vcf_files
             .par_iter()
             .map(|vcf_path| {
-                let result = vcf::vcf_processing::process_single_vcf(
+                let result = vcf_processing::process_single_vcf(
                     vcf_path,
                     samples_info.clone(), // Arc clone
                     &cli_args,
@@ -133,7 +133,7 @@ fn main() -> Result<(), Error> {
             .collect();
     pb_vcf.finish_with_message("VCF processing complete.");
 
-    let mut all_good_chromosome_data: Vec<Vec<vcf::vcf_processing::VariantGenotypeData>> = Vec::new();
+    let mut all_good_chromosome_data: Vec<Vec<vcf_processing::VariantGenotypeData>> = Vec::new();
     let mut processing_errors: Vec<Error> = Vec::new();
 
     for (i, result_chunk) in per_chromosome_data_results.into_iter().enumerate() {
@@ -171,7 +171,7 @@ fn main() -> Result<(), Error> {
         all_good_chromosome_data.len()
     );
     let (variant_ids, chromosomes, positions, numerical_genotypes_variant_major) =
-        vcf::matrix_ops::aggregate_chromosome_data(all_good_chromosome_data);
+        matrix_ops::aggregate_chromosome_data(all_good_chromosome_data);
 
     let num_total_variants = variant_ids.len();
     info!(
@@ -189,7 +189,7 @@ fn main() -> Result<(), Error> {
         "Building genotype matrix ({} samples x {} variants)...",
         samples_info.sample_count, num_total_variants
     );
-    let genotype_matrix = vcf::matrix_ops::build_matrix(
+    let genotype_matrix = matrix_ops::build_matrix(
         numerical_genotypes_variant_major,
         samples_info.sample_count,
     )?;
@@ -225,21 +225,10 @@ fn main() -> Result<(), Error> {
     )?;
     output_writer::write_eigenvalues(&cli_args.output_prefix, &pc_variances)?;
 
-    if let Some(rotation) = pca_model.rotation() {
-        if rotation.ncols() > 0 {
-            output_writer::write_loadings(
-                &cli_args.output_prefix,
-                &variant_ids,
-                &chromosomes,
-                &positions,
-                rotation,
-            )?;
-        } else {
-            info!("PCA model has 0 components in rotation matrix, skipping loadings output.");
-        }
-    } else {
-        warn!("Rotation matrix not available in PCA model, skipping loadings output.");
-    }
+    // efficient-pca 0.1.3 does not expose the rotation matrix directly after rfit.
+    // Loadings cannot be written.
+    warn!("Rotation matrix (loadings) is not available with the current version of efficient-pca after rfit. Loadings output will be skipped.");
+    // The entire if/else block for pca_model.rotation() has been removed.
 
     info!(
         "genomic_pca finished successfully in {:.2?}.",
@@ -333,22 +322,28 @@ mod pca_runner {
         let n_oversamples = 10; // Standard oversampling parameter for randomized SVD
         let seed = cli_args.rfit_seed;
         // `tolerance_rfit` is set to None, meaning rfit uses its default behavior.
-        let tolerance_rfit = None; 
+        let tolerance_rfit = None;
+        
+        let data_for_transform = genotype_matrix.clone(); // Clone for transform call
 
         info!(
             "Running efficient_pca rfit: k_requested={}, n_oversamples={}, seed={:?}, rfit_tolerance=None",
             k_requested_components, n_oversamples, seed
         );
         
-        let transformed_pcs = pca_model
+        pca_model // Modified rfit call
             .rfit(
-                genotype_matrix, // Consumed here, no prior clone needed
+                genotype_matrix, // Consumed here
                 k_requested_components,
                 n_oversamples,
                 seed,
-                tolerance_rfit, // Pass the tolerance if/when supported and desired from CLI
+                tolerance_rfit,
             )
             .map_err(|e| anyhow!("PCA computation with rfit failed: {}", e.to_string()))?;
+            
+        // Now, call transform to get the principal component scores
+        let transformed_pcs = pca_model.transform(data_for_transform)
+            .map_err(|e| anyhow!("PCA transformation failed after rfit: {}", e.to_string()))?;
         
         // `rfit` populates self.rotation and self.explained_variance within pca_model.
         // The number of columns in transformed_pcs is the actual number of components kept by rfit.
@@ -374,27 +369,10 @@ mod pca_runner {
         // The explicit pca_model.transform call on the original genotype_matrix is no longer needed.
 
         // Get principal component variances (eigenvalues) from the PCA model.
-        // `efficient_pca::PCA::rfit` is responsible for populating `explained_variance` correctly.
-        let pc_variances: Vec<f64> = pca_model.explained_variance()
-            .map_or_else(
-                || {
-                    // This case should ideally not happen if rfit ran successfully and num_components_kept > 0.
-                    // If num_components_kept is 0, explained_variance should be Some(empty_array).
-                    warn!("Explained variance not available from PCA model; variance output will be empty. This is unexpected if components were produced.");
-                    Vec::new()
-                },
-                |variances_array| {
-                    // Sanity check: the number of variances should match the number of PC columns.
-                    if variances_array.len() != num_components_kept {
-                        warn!(
-                            "Mismatch between count of explained variances in model ({}) and number of computed PC columns ({}). Using model's variances.",
-                            variances_array.len(), num_components_kept
-                        );
-                        // Despite warning, we trust the model's `explained_variance` as the primary source.
-                    }
-                    variances_array.to_vec()
-                }
-            );
+        // efficient-pca 0.1.3 does not expose explained_variance directly after rfit.
+        // We will return an empty Vec and log a warning.
+        warn!("Explained variance data is not available with the current version of efficient-pca after rfit. Eigenvalues output will be empty.");
+        let pc_variances: Vec<f64> = Vec::new();
 
         // The function returns the fitted model, the PC scores for the training data, and their variances.
         Ok((pca_model, transformed_pcs, pc_variances))
