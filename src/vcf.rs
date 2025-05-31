@@ -124,7 +124,7 @@ mod vcf_processing {
 
             if ref_bases_str.len() != 1
                 || alt_bases_obj.len() != 1
-            // Removed: || alt_bases_obj.as_ref().len() != 1
+            // Removed: || alt_bases_obj.as_ref().len() != 1 
             {
                 debug!(
                     "Variant at {}:{} (REF:{}, ALT:{}) is not a bi-allelic SNP (single base REF, single base ALT), skipping.",
