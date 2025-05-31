@@ -23,8 +23,8 @@ use std::{
 };
 
 
-mod vcf_processing {
-    use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, cli};
+pub mod vcf_processing {
+    use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader};
     use noodles_vcf::{
         self as vcf,
         variant::record::{
@@ -303,7 +303,7 @@ mod vcf_processing {
     }
 }
 
-mod matrix_ops {
+pub mod matrix_ops {
     use super::{anyhow, Result, Array2};
     use super::vcf_processing::VariantGenotypeData;
 

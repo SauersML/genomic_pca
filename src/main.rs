@@ -12,7 +12,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use ndarray::{Array2};
 use noodles_vcf::{
-    self as vcf,
     Header as VcfHeader,
 };
 use num_cpus;
@@ -89,9 +88,9 @@ fn main() -> Result<(), Error> {
 
     let first_vcf_path = &vcf_files[0];
     info!("Reading header from first VCF: {}", first_vcf_path.display());
-    let mut first_reader = vcf::io::reader::Builder::default().build_from_path(first_vcf_path)?;
+    let mut first_reader = noodles_vcf::io::reader::Builder::default().build_from_path(first_vcf_path)?;
     let header_template = Arc::new(first_reader.read_header()?); // Used for sample name consistency
-    let samples_info = Arc::new(vcf_processing::SamplesHeaderInfo::from_header(
+    let samples_info = Arc::new(vcf::vcf_processing::SamplesHeaderInfo::from_header(
         &header_template,
         first_vcf_path,
     )?);
@@ -118,11 +117,11 @@ fn main() -> Result<(), Error> {
         .progress_chars("=> ");
     let pb_vcf = ProgressBar::new(vcf_files.len() as u64).with_style(pb_vcf_style);
 
-    let per_chromosome_data_results: Vec<Result<Option<Vec<vcf_processing::VariantGenotypeData>>>> =
+    let per_chromosome_data_results: Vec<Result<Option<Vec<vcf::vcf_processing::VariantGenotypeData>>>> =
         vcf_files
             .par_iter()
             .map(|vcf_path| {
-                let result = vcf_processing::process_single_vcf(
+                let result = vcf::vcf_processing::process_single_vcf(
                     vcf_path,
                     samples_info.clone(), // Arc clone
                     &cli_args,
@@ -134,7 +133,7 @@ fn main() -> Result<(), Error> {
             .collect();
     pb_vcf.finish_with_message("VCF processing complete.");
 
-    let mut all_good_chromosome_data: Vec<Vec<vcf_processing::VariantGenotypeData>> = Vec::new();
+    let mut all_good_chromosome_data: Vec<Vec<vcf::vcf_processing::VariantGenotypeData>> = Vec::new();
     let mut processing_errors: Vec<Error> = Vec::new();
 
     for (i, result_chunk) in per_chromosome_data_results.into_iter().enumerate() {
@@ -172,7 +171,7 @@ fn main() -> Result<(), Error> {
         all_good_chromosome_data.len()
     );
     let (variant_ids, chromosomes, positions, numerical_genotypes_variant_major) =
-        matrix_ops::aggregate_chromosome_data(all_good_chromosome_data);
+        vcf::matrix_ops::aggregate_chromosome_data(all_good_chromosome_data);
 
     let num_total_variants = variant_ids.len();
     info!(
@@ -190,7 +189,7 @@ fn main() -> Result<(), Error> {
         "Building genotype matrix ({} samples x {} variants)...",
         samples_info.sample_count, num_total_variants
     );
-    let genotype_matrix = matrix_ops::build_matrix(
+    let genotype_matrix = vcf::matrix_ops::build_matrix(
         numerical_genotypes_variant_major,
         samples_info.sample_count,
     )?;
