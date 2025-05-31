@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::error::Error;
 use log::{info, debug, warn, error};
+use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 // bed_reader imports
 use bed_reader::{Bed, ReadOptions, BedErrorPlus};
@@ -390,57 +391,144 @@ impl MicroarrayDataPreparer {
         else { info!("Successfully parsed {} LD blocks from file.", blocks.len()); }
         Ok(blocks)
     }
-
-    /// Calculates HWE Chi-squared p-value.
-    /// Counts are for genotypes AA, Aa, aa (hom_ref, het, hom_alt for Allele1 as 'a')
-    fn calculate_hwe_chi_squared_p_value(hom_allele1_count: f64, het_count: f64, hom_allele2_count: f64, total_samples: f64) -> f64 {
-        if total_samples == 0.0 { return 1.0; } // Avoid division by zero
-
-        let allele1_total_count = 2.0 * hom_allele1_count + het_count;
-        let allele2_total_count = 2.0 * hom_allele2_count + het_count;
-        let total_alleles = allele1_total_count + allele2_total_count;
-
-        if total_alleles == 0.0 { return 1.0; }
-
-        let p_freq = allele1_total_count / total_alleles; // Frequency of Allele1
-        let q_freq = allele2_total_count / total_alleles; // Frequency of Allele2
-
-        if (p_freq + q_freq - 1.0).abs() > 1e-6 { // Check if frequencies sum to 1
-             warn!("HWE: Allele frequencies p ({}) and q ({}) do not sum to 1.", p_freq, q_freq);
-             return 1.0; // Or handle as error / invalid
+    
+    /// Calculates the p-value for Hardy-Weinberg Equilibrium using a Chi-squared test.
+    ///
+    /// The Chi-squared test statistic is calculated with 1 degree of freedom.
+    /// The input counts should correspond to a biallelic marker.
+    ///
+    /// # Arguments
+    /// * `observed_homozygous_allele1_count`: Count of individuals homozygous for Allele 1 (e.g., genotype AA or A1A1).
+    /// * `observed_heterozygous_count`: Count of heterozygous individuals (e.g., genotype Aa or A1A2).
+    /// * `observed_homozygous_allele2_count`: Count of individuals homozygous for Allele 2 (e.g., genotype aa or A2A2).
+    /// * `total_samples_with_genotypes`: Sum of the three observed genotype counts (`obs_hom_A1 + obs_het + obs_hom_A2`). Must be > 0.
+    ///
+    /// # Returns
+    /// The HWE p-value as an `f64`.
+    /// Returns `1.0` (non-significant) if:
+    ///   - `total_samples_with_genotypes` is zero or negative.
+    ///   - Allele frequencies cannot be robustly determined (e.g., total alleles is zero).
+    ///   - The SNP is effectively monomorphic.
+    ///   - A Chi-squared statistic results in NaN or the CDF calculation fails.
+    /// Returns `0.0` if there's an infinite deviation from HWE (e.g., an expected count is zero while observed is not).
+    ///
+    /// # Notes on Chi-squared Test Applicability
+    /// The Chi-squared approximation is generally considered reliable when all expected
+    /// genotype counts are reasonably large.
+    /// For scenarios with very small expected counts, Fisher's exact test might be more appropriate.
+    fn calculate_hwe_chi_squared_p_value(
+        observed_homozygous_allele1_count: f64,
+        observed_heterozygous_count: f64,
+        observed_homozygous_allele2_count: f64,
+        total_samples_with_genotypes: f64,
+    ) -> f64 {
+        if total_samples_with_genotypes <= 1e-9 { // Check if effectively zero samples
+            warn!("HWE Test: Total samples ({}) is effectively zero. Cannot compute HWE p-value. Returning 1.0.", total_samples_with_genotypes);
+            return 1.0;
+        }
+    
+        // Calculate allele counts from genotype counts
+        let count_allele1 = 2.0 * observed_homozygous_allele1_count + observed_heterozygous_count;
+        let count_allele2 = 2.0 * observed_homozygous_allele2_count + observed_heterozygous_count;
+        let total_alleles_observed = count_allele1 + count_allele2;
+    
+        // If total_alleles_observed is effectively zero, it implies total_samples_with_genotypes was also zero.
+        if total_alleles_observed <= 1e-9 {
+            warn!("HWE Test: Total alleles observed ({}) is effectively zero. Cannot compute allele frequencies. Returning 1.0.", total_alleles_observed);
+            return 1.0;
+        }
+    
+        // Calculate allele frequencies
+        let frequency_allele1 = count_allele1 / total_alleles_observed;
+        let frequency_allele2 = count_allele2 / total_alleles_observed;
+    
+        // Check for monomorphic SNPs. If monomorphic, it's perfectly in HWE (p-value = 1.0).
+        // Epsilon comparison for floating point precision.
+        const FREQ_EPSILON: f64 = 1e-9;
+        if frequency_allele1 < FREQ_EPSILON || frequency_allele2 < FREQ_EPSILON {
+            // Effectively monomorphic if one allele has near-zero frequency.
+            return 1.0;
+        }
+        // Sanity check: frequencies should sum to 1.
+        if (frequency_allele1 + frequency_allele2 - 1.0).abs() > 1e-6 {
+            warn!(
+                "HWE Test: Allele frequencies p ({:.4}) and q ({:.4}) do not sum to 1.0. Counts: HomA1={:.0}, Het={:.0}, HomA2={:.0}. Check input counts.",
+                frequency_allele1, frequency_allele2, 
+                observed_homozygous_allele1_count, observed_heterozygous_count, observed_homozygous_allele2_count
+            );
+            return 1.0; // Cannot reliably compute HWE
+        }
+    
+        // Calculate expected genotype counts under HWE
+        let expected_homozygous_allele1 = frequency_allele1 * frequency_allele1 * total_samples_with_genotypes;
+        let expected_heterozygous = 2.0 * frequency_allele1 * frequency_allele2 * total_samples_with_genotypes;
+        let expected_homozygous_allele2 = frequency_allele2 * frequency_allele2 * total_samples_with_genotypes;
+    
+        // Calculate Chi-squared statistic: sum ( (Observed - Expected)^2 / Expected )
+        let mut chi_squared_statistic: f64 = 0.0;
+        const MIN_EXPECTED_FOR_DIVISION: f64 = 1e-9; // Threshold to prevent division by effective zero
+    
+        // Term for homozygous Allele 1
+        if expected_homozygous_allele1 > MIN_EXPECTED_FOR_DIVISION {
+            chi_squared_statistic += (observed_homozygous_allele1_count - expected_homozygous_allele1).powi(2)
+                / expected_homozygous_allele1;
+        } else if observed_homozygous_allele1_count > MIN_EXPECTED_FOR_DIVISION { // Expected is ~0, but observed is not
+            chi_squared_statistic = f64::INFINITY; 
+        } // If both observed and expected are ~0, term contribution is 0 (chi_squared_statistic remains unchanged).
+    
+        // Term for heterozygous
+        if chi_squared_statistic.is_finite() { 
+            if expected_heterozygous > MIN_EXPECTED_FOR_DIVISION {
+                chi_squared_statistic += (observed_heterozygous_count - expected_heterozygous).powi(2)
+                    / expected_heterozygous;
+            } else if observed_heterozygous_count > MIN_EXPECTED_FOR_DIVISION {
+                chi_squared_statistic = f64::INFINITY;
+            }
+        }
+    
+        // Term for homozygous Allele 2
+        if chi_squared_statistic.is_finite() {
+            if expected_homozygous_allele2_count > MIN_EXPECTED_FOR_DIVISION {
+                chi_squared_statistic += (observed_homozygous_allele2_count - expected_homozygous_allele2).powi(2)
+                    / expected_homozygous_allele2_count;
+            } else if observed_homozygous_allele2_count > MIN_EXPECTED_FOR_DIVISION {
+                chi_squared_statistic = f64::INFINITY;
+            }
         }
         
-        let expected_hom_allele1 = p_freq * p_freq * total_samples;
-        let expected_het = 2.0 * p_freq * q_freq * total_samples;
-        let expected_hom_allele2 = q_freq * q_freq * total_samples;
-
-        // Chi-squared statistic: sum((Observed - Expected)^2 / Expected)
-        let mut chi_squared_stat: f64 = 0.0;
-        if expected_hom_allele1 > 1e-9 { // Avoid division by zero if expected count is effectively zero
-            chi_squared_stat += (hom_allele1_count - expected_hom_allele1).powi(2) / expected_hom_allele1;
+        if chi_squared_statistic.is_nan() {
+            warn!("HWE Test: Chi-squared statistic is NaN. This can occur with extreme deviations or problematic inputs. Counts: HomA1={:.0}, Het={:.0}, HomA2={:.0}. Freqs: p={:.4}, q={:.4}. Exp: E_HomA1={:.2}, E_Het={:.2}, E_HomA2={:.2}. Returning p=1.0.",
+                observed_homozygous_allele1_count, observed_heterozygous_count, observed_homozygous_allele2_count,
+                frequency_allele1, frequency_allele2,
+                expected_homozygous_allele1, expected_heterozygous, expected_homozygous_allele2);
+            return 1.0; 
         }
-        if expected_het > 1e-9 {
-            chi_squared_stat += (het_count - expected_het).powi(2) / expected_het;
+    
+        if chi_squared_statistic == f64::INFINITY {
+            return 0.0; // Infinite deviation from HWE expectations implies p-value of 0.
         }
-        if expected_hom_allele2 > 1e-9 {
-            chi_squared_stat += (hom_allele2_count - expected_hom_allele2).powi(2) / expected_hom_allele2;
-        }
-        
+    
         // P-value from Chi-squared distribution with 1 degree of freedom
-        // Using a library for this is best (e.g., statrs or similar).
-        // For simplicity, a full Chi2 CDF is complex. This is a critical external dependency or needs careful implementation.
-        // A very basic check: if chi_squared_stat is large (e.g., > 3.84 for p=0.05, > 6.63 for p=0.01), p-value is small.
-        // Returning 1.0 for now to not filter anything based on this stub.
-        // In a production system, `statrs::distribution::ChiSquared::new(1.0).unwrap().cdf(chi_squared_stat)`
-        // would give P(X <= chi_squared_stat), so p_value = 1.0 - cdf.
-        if chi_squared_stat.is_nan() || chi_squared_stat.is_infinite() { return 1.0; }
-        // Placeholder: This is NOT a real p-value calculation.
-        // For a real implementation, use a stats library.
-        // Example thresholding: if chi_squared_stat > 10.83 (p ~ 0.001 for 1 df), then it fails.
-        if chi_squared_stat > 25.0 { // Arbitrary large value for stub
-            return 0.0; // Fails HWE
+        // P-value = P(X^2 > chi_squared_statistic) = 1 - CDF(chi_squared_statistic)
+        match ChiSquared::new(1.0) { // 1 degree of freedom for standard biallelic HWE test
+            Ok(chi_sq_dist) => {
+                let cdf_value = chi_sq_dist.cdf(chi_squared_statistic);
+                // CDF can sometimes slightly exceed 1.0 due to floating point issues for large chi_squared_statistic
+                // or return NaN if chi_squared_statistic is NaN (handled above).
+                // p-value is well-behaved.
+                if cdf_value.is_nan() {
+                    warn!("HWE Test: CDF value is NaN for Chi-squared statistic {}. Returning p=1.0.", chi_squared_statistic);
+                    1.0
+                } else {
+                    (1.0 - cdf_value).max(0.0) // p-value is not negative
+                }
+            }
+            Err(e) => {
+                // This error means ChiSquared::new(1.0) failed, which is highly unlikely for df=1.0.
+                error!("HWE Test: Failed to create ChiSquared distribution (df=1.0): {}. Chi-sq stat was: {}. Returning p=1.0.", e, chi_squared_statistic);
+                1.0 
+            }
         }
-        1.0 // Passes HWE (stub)
     }
 }
 
