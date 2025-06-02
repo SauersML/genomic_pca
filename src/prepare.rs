@@ -99,6 +99,8 @@ impl MicroarrayDataPreparer {
         let initial_bim_allele1_alleles = Arc::new(bed_for_metadata.allele_1()?.to_owned());
         let initial_bim_allele2_alleles = Arc::new(bed_for_metadata.allele_2()?.to_owned());
         let initial_bim_sids = Arc::new(bed_for_metadata.sid()?.to_owned()); // Load SNP IDs
+        let initial_bim_chromosomes = Arc::new(bed_for_metadata.chromosome()?.to_owned()); // Chromosome identifiers from BIM
+        let initial_bim_bp_positions = Arc::new(bed_for_metadata.bp_position()?.to_owned()); // Base-pair positions from BIM
         let initial_snp_count_from_bim = bed_for_metadata.sid_count()?;
         let initial_sample_count_from_fam = bed_for_metadata.iid_count()?;
         let initial_sample_ids_from_fam = Arc::new(bed_for_metadata.iid()?.to_owned());
@@ -107,7 +109,7 @@ impl MicroarrayDataPreparer {
 
         Ok(Self { 
             config, 
-            initial_bim_sids, // Store loaded SNP IDs
+            initial_bim_sids, 
             initial_bim_chromosomes, 
             initial_bim_bp_positions, 
             initial_bim_allele1_alleles, 
