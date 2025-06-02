@@ -2,7 +2,6 @@
 
 // --- Local Module Declarations ---
 mod vcf;          // 
-mod cli;
 mod prepare;
 
 // --- External Crate Imports ---
