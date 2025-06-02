@@ -682,22 +682,16 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
             .map(|qc_id| self.original_indices_of_qc_samples[qc_id.0])
             .collect();
 
-        // Acquire lock on the shared Bed instance.
-        // The lock guard ensures exclusive access for the read operation.
-        let mut bed_instance_guard = self.bed_reader_instance.lock()
-            .map_err(|e_poison| {
-                let err_msg = format!("Mutex for Bed reader was poisoned in get_standardized_block: {}", e_poison);
-                error!("{}", err_msg); // Log the error
-                DataPrepError::from(err_msg)
-            })?;
-
-        // Use the locked Bed instance (*bed_instance_guard) for reading.
+        // Open a new Bed instance for each call to this method.
+        // This is necessary because bed_reader::Bed is not Send/Sync due to internal Rc.
+        let mut bed_instance = Bed::new(&self.bed_file_path)
+            .map_err(|e| Box::new(DataPrepError::from(format!("Failed to open BED file '{}' in get_standardized_block: {}", self.bed_file_path, e))) as ThreadSafeStdError)?;
+        
         let raw_dosages_samples_by_snps_i8 = ReadOptions::builder()
             .iid_index(&bed_reader_sample_indices) 
             .sid_index(&bed_reader_snp_indices) 
-            .i8().count_a1().read(&mut *bed_instance_guard) // Dereference guard to get &mut Bed
+            .i8().count_a1().read(&mut bed_instance) // Use the locally created Bed instance
             .map_err(|e_bed_read| Box::new(DataPrepError::from(format!("Bed read failed in get_standardized_block: {}", e_bed_read))) as ThreadSafeStdError)?;
-        // Mutex guard is automatically released when bed_instance_guard goes out of scope here.
 
         let raw_dosages_snps_by_samples_i8 = raw_dosages_samples_by_snps_i8.t();
         let mut standardized_block_snps_by_samples_f32 = Array2::<f32>::zeros(raw_dosages_snps_by_samples_i8.raw_dim());
@@ -715,12 +709,17 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
             } else {
                 for i_req_sample in 0..num_requested_samples {
                     let raw_dosage_val_i8 = input_raw_snp_row_view[i_req_sample];
-                    if raw_dosage_val_i8 == -127 { // Missing genotype
-                        // We NEVER impute with mean
-                        // If there is a missing genotype for anyone, remove the entire row
-                        output_std_snp_row[i_req_sample] = (0.0 - mean_dosage) / std_dev_dosage;  // fix later to remove site, no impute
-                         warn!("Unexpected missing genotype in get_standardized_block for PCA SNP D_blocked_ID {}, requested sample index {}. Standardized as (0-mean)/std_dev.", 
-                               current_pca_snp_id_val, qc_sample_ids_to_fetch[i_req_sample].0);
+                    if raw_dosage_val_i8 == -127 { // Missing genotype. This should not happen if QC filters are effective.
+                        // This indicates an issue, as SNPs with missing data (among QC'd samples)
+                        // should have been filtered out by `perform_snp_qc_and_calc_std_params`.
+                        let error_message = format!(
+                            "Unexpected missing genotype encountered in get_standardized_block for PCA SNP ID {} (original BIM index {}), QC'd sample index {}. SNPs with missing data among QC'd samples should be filtered prior to this stage.",
+                            current_pca_snp_id_val,
+                            self.original_indices_of_pca_snps[current_pca_snp_id_val], // Provides more context
+                            qc_sample_ids_to_fetch[i_req_sample].0
+                        );
+                        error!("{}", error_message); // Log the critical error
+                        return Err(Box::new(DataPrepError::from(error_message)) as ThreadSafeStdError);
                     } else {
                         output_std_snp_row[i_req_sample] = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
                     }
