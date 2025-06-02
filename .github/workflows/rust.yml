@@ -21,7 +21,7 @@ jobs:
   generate_getdoc_report:
     name: Generate getdoc Report
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || !contains(github.event.head_commit.message, 'Merge pull request #')
+    if: "github.event_name == 'pull_request' || !contains(github.event.head_commit.message, 'Merge pull request #')"
     
     steps:
       - name: Checkout code
@@ -46,12 +46,7 @@ jobs:
             ${{ runner.os }}-cargo-deps-
             
       - name: Output Cargo Dependencies Cache Info
-        run: |
-          if [ "${{ steps.cache-cargo-deps.outputs.cache-hit }}" == "true" ]; then
-            echo "Cargo dependencies cache hit: true"
-          else
-            echo "Cargo dependencies cache hit: false"
-          fi
+        run: echo "Cargo dependencies cache hit ${{ steps.cache-cargo-deps.outputs.cache-hit }}"
           
       - name: Install getdoc
         run: cargo install getdoc --locked
