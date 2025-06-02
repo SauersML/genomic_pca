@@ -172,83 +172,146 @@ impl MicroarrayDataPreparer {
         Ok((qc_sample_original_indices, num_qc_samples))
     }
 
+    /// Performs SNP quality control (call rate, MAF, HWE) and calculates standardization parameters (mean, std dev).
+    /// This version initializes one `Bed` reader instance per Rayon worker thread for efficiency.
     fn perform_snp_qc_and_calc_std_params(
         &self,
-        original_indices_of_qc_samples: &[isize],
-        num_qc_samples: usize,
+        original_indices_of_qc_samples: &[isize], // Original indices of samples that passed sample QC.
+        num_qc_samples: usize,                   // Count of samples that passed sample QC.
     ) -> Result<(Vec<IntermediateSnpDetails>, usize), ThreadSafeStdError> {
         info!("Phase 0.3 & 0.4: SNP QC & Standardization Params for {} samples...", num_qc_samples);
-        if num_qc_samples == 0 { return Ok((Vec::new(), 0)); }
-        let final_qc_snps_details: Vec<IntermediateSnpDetails> = (0..self.initial_snp_count_from_bim)
+        if num_qc_samples == 0 {
+            debug!("No QC samples, skipping SNP QC.");
+            return Ok((Vec::new(), 0));
+        }
+
+        // Clone data needed by closures to satisfy lifetime/capture requirements.
+        // Arcs are cheap to clone as they only copy the pointer and increment ref count.
+        let bed_file_path_for_init = self.config.bed_file_path.clone();
+        let qc_sample_indices_arc = Arc::new(original_indices_of_qc_samples.to_vec());
+        
+        // Capture necessary configuration and initial BIM data for use in the parallel map closure.
+        // These are already Arcs or clonable parts of config.
+        let min_snp_call_rate_threshold_val = self.config.min_snp_call_rate_threshold;
+        let min_snp_maf_threshold_val = self.config.min_snp_maf_threshold;
+        let max_snp_hwe_p_value_threshold_val = self.config.max_snp_hwe_p_value_threshold;
+        let initial_bim_chromosomes_arc = self.initial_bim_chromosomes.clone();
+        let initial_bim_bp_positions_arc = self.initial_bim_bp_positions.clone();
+        let initial_bim_allele1_alleles_arc = self.initial_bim_allele1_alleles.clone();
+        let initial_bim_allele2_alleles_arc = self.initial_bim_allele2_alleles.clone();
+
+        // Process SNPs in parallel. Each thread gets its own Bed reader.
+        let final_qc_snps_options: Vec<Option<IntermediateSnpDetails>> = (0..self.initial_snp_count_from_bim)
             .into_par_iter()
-            .filter_map(|original_m_idx| {
-                let mut thread_bed = match Bed::new(&self.config.bed_file_path) {
-                    Ok(b) => b,
-                    Err(e) => { error!("SNP QC Thread: Failed to open BED for SNP original_idx {}: {:?}", original_m_idx, e); return None; }
-                };
+            .map_init(
+                || { // INIT CLOSURE: Runs ONCE PER RAYON WORKER THREAD
+                    Bed::new(&bed_file_path_for_init)
+                        .map_err(|e| {
+                            // Log error here. The map closure will receive Err.
+                            error!("SNP QC Thread Init: Failed to open BED '{}': {:?}", bed_file_path_for_init, e);
+                            e 
+                        })
+                },
+                |bed_init_result, original_m_idx| { // MAP CLOSURE: Runs for each SNP
+                    match bed_init_result {
+                        Ok(ref mut thread_local_bed) => { // Successfully initialized Bed for this thread
+                            let snp_genotypes_n_x_1_result = ReadOptions::builder()
+                                .iid_index(qc_sample_indices_arc.as_slice())
+                                .sid_index(original_m_idx as isize)
+                                .i8()
+                                .count_a1()
+                                .read(thread_local_bed);
 
-                let snp_genotypes_n_x_1 = match ReadOptions::builder()
-                    .iid_index(original_indices_of_qc_samples)
-                    .sid_index(original_m_idx as isize)
-                    .i8().count_a1().read(&mut thread_bed) {
-                        Ok(data) => data,
-                        Err(e) => { warn!("SNP QC: Read failed for original SNP idx {}: {:?}", original_m_idx, e); return None; }
-                    };
-                let snp_genotype_column_view: ArrayView1<i8> = snp_genotypes_n_x_1.column(0);
+                            match snp_genotypes_n_x_1_result {
+                                Ok(snp_genotypes_n_x_1) => {
+                                    let snp_genotype_column_view: ArrayView1<i8> = snp_genotypes_n_x_1.column(0);
 
-                let num_non_missing_genotypes = snp_genotype_column_view.iter().filter(|&&g_val| g_val != -127i8).count();
-                if num_non_missing_genotypes == 0 { return None; }
-                let call_rate = num_non_missing_genotypes as f64 / num_qc_samples as f64;
-                if call_rate < self.config.min_snp_call_rate_threshold { return None; }
-                if num_non_missing_genotypes != num_qc_samples { return None; } // Strict: No missing in QC'd samples
+                                    let num_non_missing_genotypes = snp_genotype_column_view.iter().filter(|&&g_val| g_val != -127i8).count();
+                                    if num_non_missing_genotypes == 0 { return None; }
+                                    
+                                    let call_rate = num_non_missing_genotypes as f64 / num_qc_samples as f64;
+                                    if call_rate < min_snp_call_rate_threshold_val { return None; }
+                                    
+                                    // Strict filter: no missing genotypes allowed for SNPs included in PCA, among QC'd samples.
+                                    if num_non_missing_genotypes != num_qc_samples { return None; }
 
-                let mut allele1_dosage_sum_f64: f64 = 0.0;
-                let mut observed_hom_ref_count: f64 = 0.0; 
-                let mut observed_het_count: f64 = 0.0; 
-                let mut observed_hom_alt_count: f64 = 0.0;
+                                    let mut allele1_dosage_sum_f64: f64 = 0.0;
+                                    let mut observed_hom_ref_count: f64 = 0.0;
+                                    let mut observed_het_count: f64 = 0.0;
+                                    let mut observed_hom_alt_count: f64 = 0.0;
 
-                for &genotype_val_i8 in snp_genotype_column_view.iter() {
-                    let dosage_f64 = genotype_val_i8 as f64; // Allele1 dosage (0, 1, or 2)
-                    allele1_dosage_sum_f64 += dosage_f64;
-                    match genotype_val_i8 {
-                        0 => observed_hom_ref_count += 1.0,
-                        1 => observed_het_count += 1.0,
-                        2 => observed_hom_alt_count += 1.0,
-                        _ => { /* Should be unreachable due to strict missingness filter */ }
+                                    for &genotype_val_i8 in snp_genotype_column_view.iter() {
+                                        let dosage_f64 = genotype_val_i8 as f64;
+                                        allele1_dosage_sum_f64 += dosage_f64;
+                                        match genotype_val_i8 {
+                                            0 => observed_hom_ref_count += 1.0,
+                                            1 => observed_het_count += 1.0,
+                                            2 => observed_hom_alt_count += 1.0,
+                                            _ => { /* Unreachable with current strict missingness filter */ }
+                                        }
+                                    }
+                                    
+                                    let total_alleles_observed_f64 = 2.0 * num_qc_samples as f64;
+                                    let allele1_frequency = allele1_dosage_sum_f64 / total_alleles_observed_f64;
+                                    let minor_allele_frequency = allele1_frequency.min(1.0 - allele1_frequency);
+                                    
+                                    // Filter by MAF. Also filter if monomorphic (freq effectively 0 or 1).
+                                    if minor_allele_frequency < min_snp_maf_threshold_val || 
+                                       allele1_frequency.abs() < 1e-9 || 
+                                       (1.0 - allele1_frequency).abs() < 1e-9 {
+                                        return None;
+                                    }
+
+                                    // HWE Test if threshold is set to be restrictive (not 1.0)
+                                    if max_snp_hwe_p_value_threshold_val < 1.0 {
+                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(
+                                            observed_hom_ref_count, observed_het_count, observed_hom_alt_count, num_qc_samples as f64
+                                        );
+                                        if hwe_p_val <= max_snp_hwe_p_value_threshold_val { return None; }
+                                    }
+                                    
+                                    let mean_allele1_dosage_f32 = (allele1_dosage_sum_f64 / num_qc_samples as f64) as f32;
+                                    let sum_sq_diff_f64: f64 = snp_genotype_column_view.iter()
+                                        .map(|&g_val| (g_val as f64 - mean_allele1_dosage_f32 as f64).powi(2))
+                                        .sum();
+                                    
+                                    // Sample variance (N-1 denominator if N > 1)
+                                    let variance_denominator = (num_qc_samples.saturating_sub(1) as f64).max(1.0);
+                                    let variance_allele1_dosage = sum_sq_diff_f64 / variance_denominator;
+                                    
+                                    // Filter if variance is effectively zero (prevents division by zero later)
+                                    if variance_allele1_dosage <= 1e-9 { return None; }
+                                    let std_dev_allele1_dosage_f32 = (variance_allele1_dosage.sqrt()) as f32;
+                                    
+                                    // If all QC checks pass, construct and return the details.
+                                    Some(IntermediateSnpDetails {
+                                        original_m_idx,
+                                        chromosome: initial_bim_chromosomes_arc[original_m_idx].clone(),
+                                        bp_position: initial_bim_bp_positions_arc[original_m_idx],
+                                        allele1: initial_bim_allele1_alleles_arc[original_m_idx].clone(),
+                                        allele2: initial_bim_allele2_alleles_arc[original_m_idx].clone(),
+                                        mean_allele1_dosage: Some(mean_allele1_dosage_f32),
+                                        std_dev_allele1_dosage: Some(std_dev_allele1_dosage_f32),
+                                    })
+                                }
+                                Err(e) => {
+                                    warn!("SNP QC: Read failed for original SNP idx {}: {:?}", original_m_idx, e);
+                                    None
+                                }
+                            }
+                        }
+                        Err(_e_bed_init) => {
+                            // Bed initialization failed for this thread, error already logged by init closure.
+                            // This SNP cannot be processed by this particular thread.
+                            None
+                        }
                     }
                 }
-                
-                let total_alleles_observed_f64 = 2.0 * num_qc_samples as f64;
-                let allele1_frequency = allele1_dosage_sum_f64 / total_alleles_observed_f64;
-                let minor_allele_frequency = allele1_frequency.min(1.0 - allele1_frequency);
-                if minor_allele_frequency < self.config.min_snp_maf_threshold || allele1_frequency.abs() < 1e-9 || (1.0 - allele1_frequency).abs() < 1e-9 { return None; }
+            )
+            .collect();
 
-                if self.config.max_snp_hwe_p_value_threshold < 1.0 { // Only test if threshold is not effectively "off"
-                    let hwe_p_val = Self::calculate_hwe_chi_squared_p_value(
-                        observed_hom_ref_count, observed_het_count, observed_hom_alt_count, num_qc_samples as f64
-                    );
-                    if hwe_p_val <= self.config.max_snp_hwe_p_value_threshold { return None; }
-                }
-                
-                let mean_allele1_dosage_f32 = (allele1_dosage_sum_f64 / num_qc_samples as f64) as f32;
-                let sum_sq_diff_f64: f64 = snp_genotype_column_view.iter()
-                    .map(|&g_val| (g_val as f64 - mean_allele1_dosage_f32 as f64).powi(2))
-                    .sum();
-                let variance_allele1_dosage = sum_sq_diff_f64 / ((num_qc_samples.saturating_sub(1)) as f64).max(1.0);
-                
-                if variance_allele1_dosage <= 1e-9 { return None; } // Effectively zero variance
-                let std_dev_allele1_dosage_f32 = (variance_allele1_dosage.sqrt()) as f32;
-                
-                Some(IntermediateSnpDetails {
-                    original_m_idx,
-                    chromosome: self.initial_bim_chromosomes[original_m_idx].clone(),
-                    bp_position: self.initial_bim_bp_positions[original_m_idx],
-                    allele1: self.initial_bim_allele1_alleles[original_m_idx].clone(),
-                    allele2: self.initial_bim_allele2_alleles[original_m_idx].clone(),
-                    mean_allele1_dosage: Some(mean_allele1_dosage_f32),
-                    std_dev_allele1_dosage: Some(std_dev_allele1_dosage_f32),
-                })
-            }).collect();
+        // Filter out the Nones from SNPs that failed QC or couldn't be read
+        let final_qc_snps_details: Vec<IntermediateSnpDetails> = final_qc_snps_options.into_iter().flatten().collect();
 
         let num_final_qc_snps = final_qc_snps_details.len();
         info!("SNP QC & Stats: {} / {} initial SNPs passed all filters.", num_final_qc_snps, self.initial_snp_count_from_bim);
