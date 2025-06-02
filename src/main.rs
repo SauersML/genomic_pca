@@ -1,12 +1,9 @@
 // main.rs
 
 // --- Local Module Declarations ---
-mod cli;
 mod vcf;          // 
-mod matrix_ops;   // 
 mod pca_runner;   // For the VCF workflow using EfficientPcaModel
 mod output_writer;// For writing results from both workflows
-mod prepare;      // 
 
 // --- External Crate Imports ---
 use anyhow::{anyhow, Error, Result};
