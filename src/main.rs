@@ -305,10 +305,10 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     )?;
     
     // Conditional diagnostics output
-    #[cfg(feature = "enable-eigensnp-diagnostics")]
+    #[cfg(feature = "eigensnp-diagnostics")]
     if cli_args.eigensnp_collect_diagnostics {
         // The type of diagnostics_option here is `Option<efficient_pca::diagnostics::FullPcaRunDetailedDiagnostics>`
-        // if the feature `enable-eigensnp-diagnostics` is active for the `efficient_pca` crate.
+        // if the feature `eigensnp-diagnostics` is active for the `efficient_pca` crate.
         // If not, it's `()`.
         if let Some(diag_data) = diagnostics_option {
             let diag_filename = format!("{}.eigensnp_diagnostics.json", cli_args.output_prefix);
@@ -322,10 +322,10 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
                 Err(e_json) => warn!("Failed to serialize EigenSNP diagnostics to JSON: {}", e_json),
             }
         } else {
-             info!("EigenSNP-Rust diagnostics collection was enabled via CLI, but no diagnostic data structure was returned from PCA computation (this might happen if the 'enable-eigensnp-diagnostics' feature is not active in the 'efficient_pca' library itself).");
+             info!("EigenSNP-Rust diagnostics collection was enabled via CLI, but no diagnostic data structure was returned from PCA computation (this might happen if the 'eigensnp-diagnostics' feature is not active in the 'efficient_pca' library itself).");
         }
     }
-    #[cfg(not(feature = "enable-eigensnp-diagnostics"))]
+    #[cfg(not(feature = "eigensnp-diagnostics"))]
     { let _ = diagnostics_option; /* Mark as used if diagnostics feature is off */ }
 
     Ok(())
@@ -472,7 +472,7 @@ mod cli {
         #[arg(long, help="Number of refinement passes for EigenSNP-Rust (default: 1 when --eigensnp is active).", default_value_if("eigensnp", "true", Some("1")))]
         pub(crate) eigensnp_refine_passes: Option<usize>,
 
-        #[arg(long, help="Enable detailed diagnostics collection for EigenSNP-Rust (if library feature 'enable-eigensnp-diagnostics' is active).")]
+        #[arg(long, help="Enable detailed diagnostics collection for EigenSNP-Rust (if library feature 'eigensnp-diagnostics' is active).")]
         pub(crate) eigensnp_collect_diagnostics: bool, // Defaults to false
     }
 }
