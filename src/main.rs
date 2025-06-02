@@ -2,8 +2,8 @@
 
 // --- Local Module Declarations ---
 mod vcf;          // 
-mod pca_runner;   // For the VCF workflow using EfficientPcaModel
-mod output_writer;// For writing results from both workflows
+mod cli;
+mod prepare;
 
 // --- External Crate Imports ---
 use anyhow::{anyhow, Error, Result};
@@ -27,7 +27,7 @@ use std::{
 use crate::cli::CliArgs;
 // VCF Workflow specific
 use crate::vcf::vcf_processing::SamplesHeaderInfo;
-use crate::matrix_ops::{aggregate_chromosome_data, build_matrix};
+use crate::vcf::matrix_ops::{aggregate_chromosome_data, build_matrix};
 use crate::pca_runner::run_genomic_pca;
 // EigenSNP-Rust Data Preparation (local, from src/prepare.rs)
 use crate::prepare::{MicroarrayDataPreparer, MicroarrayDataPreparerConfig};
