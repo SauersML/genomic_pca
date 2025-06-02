@@ -3,7 +3,6 @@ name: Generate getdoc Report
 on:
   push:
     branches: [main]
-    if: "!contains(github.event.head_commit.message, 'Merge pull request #')"
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -16,23 +15,24 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: read # Assuming read is sufficient for getdoc and checkout
+  contents: read
 
 jobs:
   generate_getdoc_report:
     name: Generate getdoc Report
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || !contains(github.event.head_commit.message, 'Merge pull request #')
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+        
       - name: Install Rust toolchain
-        id: install_rust # Keep id if other steps might use it, otherwise optional
-        uses: dtolnay/rust-toolchain@stable # Keeping stable as per plan
+        id: install_rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy # Adding components that might be useful for getdoc
-
-      # Keep general cargo caching for registry/git
+          components: rustfmt, clippy
+          
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         id: cache-cargo-deps
@@ -41,19 +41,23 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          # Using existing key from rust.yml, assuming Cargo.lock is still relevant for getdoc's deps
           key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-deps-
-
+            
       - name: Output Cargo Dependencies Cache Info
-        run: echo "Cargo dependencies cache hit: ${{ steps.cache-cargo-deps.outputs.cache-hit }}"
-
+        run: |
+          if [ "${{ steps.cache-cargo-deps.outputs.cache-hit }}" == "true" ]; then
+            echo "Cargo dependencies cache hit: true"
+          else
+            echo "Cargo dependencies cache hit: false"
+          fi
+          
       - name: Install getdoc
         run: cargo install getdoc --locked
-
+        
       - name: Run getdoc
         run: getdoc
-
+        
       - name: Display report.md
         run: cat report.md
