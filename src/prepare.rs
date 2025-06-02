@@ -9,6 +9,11 @@ use statrs::distribution::{ChiSquared, ContinuousCDF};
 // bed_reader imports
 use bed_reader::{Bed, ReadOptions, BedErrorPlus};
 
+// efficient_pca::eigensnp imports for types and traits used by MicroarrayDataPreparer
+use efficient_pca::eigensnp::{
+    PcaSnpId, QcSampleId, LdBlockSpecification, PcaReadyGenotypeAccessor, ThreadSafeStdError,
+};
+
 // --- Custom Error Type for this Module ---
 #[derive(Debug)]
 pub struct DataPrepError(String);
@@ -50,42 +55,6 @@ impl From<std::num::ParseFloatError> for DataPrepError {
 }
 
 
-/// Thread-safe standard dynamic error.
-pub type ThreadSafeStdError = Box<dyn Error + Send + Sync + 'static>;
-
-// --- EigenSNP Interface Types (as expected by EigenSNPCoreAlgorithm) ---
-
-/// Identifies a SNP included in the PCA (post-QC and part of an LD block).
-/// This index is relative to the final list of $D_{blocked}$ SNPs used in the analysis.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PcaSnpId(pub usize);
-
-/// Identifies a sample included in the PCA (post-QC).
-/// This index is relative to the final list of $N$ QC'd samples.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct QcSampleId(pub usize);
-
-/// Specification for a single Linkage Disequilibrium (LD) block.
-#[derive(Clone, Debug)]
-pub struct LdBlockSpecification {
-    pub defined_block_tag: String,
-    pub pca_snp_ids_in_block: Vec<PcaSnpId>, // Sorted PcaSnpId(0..D_blocked-1)
-}
-
-/// Defines how the EigenSNP PCA algorithm accesses globally standardized genotype data.
-pub trait PcaReadyGenotypeAccessor: Sync {
-    /// Fetches a block of globally standardized genotypes.
-    /// Output: SNPs as rows, Samples as columns (M_requested x N_requested).
-    fn get_standardized_snp_sample_block(
-        &self,
-        pca_snp_ids_to_fetch: &[PcaSnpId],
-        qc_sample_ids_to_fetch: &[QcSampleId],
-    ) -> Result<Array2<f32>, ThreadSafeStdError>;
-
-    fn num_pca_snps(&self) -> usize; // D_blocked
-    fn num_qc_samples(&self) -> usize; // N
-}
-
 // --- Helper Struct for Intermediate SNP Data ---
 #[derive(Debug, Clone)]
 struct IntermediateSnpDetails {
@@ -111,6 +80,7 @@ pub struct MicroarrayDataPreparerConfig {
 pub struct MicroarrayDataPreparer {
     config: MicroarrayDataPreparerConfig,
     // Cached initial BIM data for efficient access by parallel threads
+    initial_bim_sids: Arc<Array1<String>>, // SNP Identifiers from BIM file
     initial_bim_chromosomes: Arc<Array1<String>>,
     initial_bim_bp_positions: Arc<Array1<i32>>,
     initial_bim_allele1_alleles: Arc<Array1<String>>,
@@ -126,10 +96,9 @@ impl MicroarrayDataPreparer {
         let mut bed_for_metadata = Bed::new(&config.bed_file_path)
             .map_err(|e| DataPrepError::from(format!("Failed to open BED file '{}' for metadata: {}", config.bed_file_path, e)))?;
         
-        let initial_bim_chromosomes = Arc::new(bed_for_metadata.chromosome()?.to_owned());
-        let initial_bim_bp_positions = Arc::new(bed_for_metadata.bp_position()?.to_owned());
         let initial_bim_allele1_alleles = Arc::new(bed_for_metadata.allele_1()?.to_owned());
         let initial_bim_allele2_alleles = Arc::new(bed_for_metadata.allele_2()?.to_owned());
+        let initial_bim_sids = Arc::new(bed_for_metadata.sid()?.to_owned()); // Load SNP IDs
         let initial_snp_count_from_bim = bed_for_metadata.sid_count()?;
         let initial_sample_count_from_fam = bed_for_metadata.iid_count()?;
         let initial_sample_ids_from_fam = Arc::new(bed_for_metadata.iid()?.to_owned());
@@ -138,6 +107,7 @@ impl MicroarrayDataPreparer {
 
         Ok(Self { 
             config, 
+            initial_bim_sids, // Store loaded SNP IDs
             initial_bim_chromosomes, 
             initial_bim_bp_positions, 
             initial_bim_allele1_alleles, 
@@ -534,8 +504,30 @@ impl MicroarrayDataPreparer {
                 // This error means ChiSquared::new(1.0) failed, which is highly unlikely for df=1.0.
                 error!("HWE Test: Failed to create ChiSquared distribution (df=1.0): {}. Chi-sq stat was: {}. Returning p=1.0.", e, chi_squared_statistic);
                 1.0 
-            }
+            }      
         }
+    }
+
+    // --- Public Accessor Methods for MicroarrayDataPreparer ---
+
+    /// Returns a shared reference to the initial SNP IDs from the BIM file.
+    pub fn initial_bim_sids_arc(&self) -> &Arc<Array1<String>> {
+        &self.initial_bim_sids
+    }
+
+    /// Returns a shared reference to the initial SNP chromosomes from the BIM file.
+    pub fn initial_bim_chromosomes_arc(&self) -> &Arc<Array1<String>> {
+        &self.initial_bim_chromosomes
+    }
+
+    /// Returns a shared reference to the initial SNP basepair positions from the BIM file.
+    pub fn initial_bim_bp_positions_arc(&self) -> &Arc<Array1<i32>> {
+        &self.initial_bim_bp_positions
+    }
+
+    /// Returns a shared reference to the initial sample IDs from the FAM file.
+    pub fn initial_sample_ids_from_fam_arc(&self) -> &Arc<Array1<String>> {
+        &self.initial_sample_ids_from_fam
     }
 }
 
@@ -570,6 +562,21 @@ impl MicroarrayGenotypeAccessor {
             mean_allele1_dosages_for_pca_snps, std_devs_allele1_dosages_for_pca_snps,
             num_total_qc_samples, num_total_pca_snps,
         }
+    }
+
+    // --- Public Accessor Methods for MicroarrayGenotypeAccessor ---
+
+    /// Returns a shared reference to the vector of original (FAM) indices of QC-passed samples.
+    /// These indices map to the `initial_sample_ids_from_fam` array in `MicroarrayDataPreparer`.
+    pub fn original_indices_of_qc_samples(&self) -> &Arc<Vec<isize>> {
+        &self.original_indices_of_qc_samples
+    }
+
+    /// Returns a shared reference to the vector of original (BIM) indices of PCA-ready SNPs.
+    /// These indices map to the initial BIM metadata arrays (sids, chromosomes, positions)
+    /// in `MicroarrayDataPreparer`.
+    pub fn original_indices_of_pca_snps(&self) -> &Arc<Vec<usize>> {
+        &self.original_indices_of_pca_snps
     }
 }
 
