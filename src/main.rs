@@ -407,8 +407,8 @@ mod cli {
         #[arg(short = 'k', long, help = "Number of principal components to compute (for VCF workflow).", required_unless_present("eigensnp"))]
         pub(crate) components: Option<usize>,
 
-        #[arg(long, help = "Minimum Minor Allele Frequency (MAF) for VCF variant filtering (default: 0.01 for VCF workflow).", default_value_if("vcf_dir", Some("*"), Some("0.01")))]
-        pub(crate) maf: Option<f64>, // Default applies if vcf_dir is used.
+        #[arg(long, help = "Minimum Minor Allele Frequency (MAF) for VCF variant filtering (VCF workflow). If not set, defaults to 0.01 for VCF mode when processing.")]
+        pub(crate) maf: Option<f64>,
 
         #[arg(long, help = "Seed for randomized SVD in efficient-pca (for VCF workflow).")]
         pub(crate) rfit_seed: Option<u64>,
