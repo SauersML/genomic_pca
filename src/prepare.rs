@@ -318,15 +318,15 @@ impl MicroarrayDataPreparer {
                     .collect();
                 if pca_snp_ids_for_block.is_empty() { None } else {
                     pca_snp_ids_for_block.sort_unstable(); 
-                    Some(LdBlockSpecification { 
-                        defined_block_tag: block_tag_str, 
-                        pca_snp_ids_in_block: pca_snp_ids_for_block 
-                    })
-                }
-            })
-            .collect();
-        
-        ld_block_specifications.sort_by(|a, b| a.defined_block_tag.cmp(&b.defined_block_tag));
+                Some(LdBlockSpecification { 
+                    user_defined_block_tag: block_tag_str, 
+                    pca_snp_ids_in_block: pca_snp_ids_for_block 
+                })
+            }
+        })
+        .collect();
+    
+        ld_block_specifications.sort_by(|a, b| a.user_defined_block_tag.cmp(&b.user_defined_block_tag));
 
         info!("LD Mapping: {} unique SNPs (D_blocked) mapped to {} LD blocks.", num_blocked_snps_for_pca, ld_block_specifications.len());
         Ok((ld_block_specifications, original_indices_of_pca_snps, mean_allele_dosages_for_pca_snps, std_devs_allele_dosages_for_pca_snps, num_blocked_snps_for_pca))
