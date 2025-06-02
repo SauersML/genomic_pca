@@ -220,6 +220,7 @@ impl MicroarrayDataPreparer {
                                 .sid_index(original_m_idx as isize)
                                 .i8()
                                 .count_a1()
+                                .num_threads(1) // bed_reader uses only one thread for this read.
                                 .read(thread_local_bed);
 
                             match snp_genotypes_n_x_1_result {
