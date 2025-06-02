@@ -36,7 +36,7 @@ rayon = "1.10.0"
 bed-reader = "1.0.6"
 statrs = "0.18.0"
 url = "2.5.4"
-
+efficient_pca = { git = "https://github.com/SauersML/efficient_pca.git", branch = "main", features = ["enable-eigensnp-diagnostics"] }
 ndarray-linalg = { version = "0.17.0", default-features = false, features = ["openblas-static"] }
 
 [profile.release]
