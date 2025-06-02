@@ -155,7 +155,7 @@ impl MicroarrayDataPreparer {
     }
 
     fn perform_sample_qc(&self) -> Result<(Vec<isize>, usize), ThreadSafeStdError> {
-        info!("Phase 0.2: Performing sample QC using {} initial samples...", self.initial_sample_count_from_fam);
+        info!("Performing sample QC using {} initial samples...", self.initial_sample_count_from_fam);
         let qc_sample_original_indices: Vec<isize> = if let Some(ref path) = self.config.sample_ids_to_keep_file_path {
             info!("Reading sample list to keep from: {}", path);
             let file_content = std::fs::read_to_string(path).map_err(DataPrepError::from)?;
@@ -179,7 +179,7 @@ impl MicroarrayDataPreparer {
         original_indices_of_qc_samples: &[isize], // Original indices of samples that passed sample QC.
         num_qc_samples: usize,                   // Count of samples that passed sample QC.
     ) -> Result<(Vec<IntermediateSnpDetails>, usize), ThreadSafeStdError> {
-        info!("Phase 0.3 & 0.4: SNP QC & Standardization Params for {} samples...", num_qc_samples);
+        info!("SNP QC & Standardization Params for {} samples...", num_qc_samples);
         if num_qc_samples == 0 {
             debug!("No QC samples, skipping SNP QC.");
             return Ok((Vec::new(), 0));
@@ -322,7 +322,7 @@ impl MicroarrayDataPreparer {
         &self,
         final_qc_snps_details_list: &[IntermediateSnpDetails], // Length D_final
     ) -> Result<(Vec<LdBlockSpecification>, Vec<usize>, Array1<f32>, Array1<f32>, usize), ThreadSafeStdError> {
-        info!("Phase 0.6: Mapping {} final QC'd SNPs to LD blocks from '{}'...", final_qc_snps_details_list.len(), self.config.ld_block_file_path);
+        info!("Mapping {} final QC'd SNPs to LD blocks from '{}'...", final_qc_snps_details_list.len(), self.config.ld_block_file_path);
         let parsed_ld_blocks = self.parse_ld_block_file()?;
 
         let mut block_tag_to_original_m_indices: HashMap<String, Vec<usize>> = HashMap::new();
