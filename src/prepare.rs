@@ -140,22 +140,16 @@ impl MicroarrayDataPreparer {
             self.map_snps_to_ld_blocks(&final_qc_snps_details)?;
         if num_blocked_snps_for_pca == 0 { return Err(DataPrepError::from("No SNPs mapped to LD blocks or all resulting blocks were empty.").into()); }
 
-        // MicroarrayGenotypeAccessor::new now returns a Result, so handle it.
+        // MicroarrayGenotypeAccessor::new now returns Self directly.
         let accessor = MicroarrayGenotypeAccessor::new(
             self.config.bed_file_path.clone(),
             Arc::new(original_indices_of_qc_samples),
-            Arc::new(original_indices_of_pca_snps),
-            Arc::new(mean_allele_dosages_for_pca_snps),
-            Arc::new(std_devs_allele_dosages_for_pca_snps),
+            Arc::new(original_indices_of_pca_snps),   
+            Arc::new(mean_allele_dosages_for_pca_snps), 
+            Arc::new(std_devs_allele_dosages_for_pca_snps), 
             num_qc_samples,
             num_blocked_snps_for_pca,
-        ).map_err(|e_accessor_init| -> ThreadSafeStdError {
-            error!("Failed to initialize MicroarrayGenotypeAccessor: {}", e_accessor_init);
-            Box::new(e_accessor_init) // Convert DataPrepError to ThreadSafeStdError
-        })?;
-
-        info!("Data preparation pipeline complete. Ready for EigenSNP. N_samples_qc={}, D_snps_blocked_for_pca={}", num_qc_samples, num_blocked_snps_for_pca);
-
+        );
         info!("Data preparation pipeline complete. Ready for EigenSNP. N_samples_qc={}, D_snps_blocked_for_pca={}", num_qc_samples, num_blocked_snps_for_pca);
         Ok((accessor, ld_block_specifications, num_qc_samples, num_blocked_snps_for_pca))
     }
