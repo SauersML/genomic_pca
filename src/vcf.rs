@@ -266,18 +266,19 @@ pub mod vcf_processing {
 
             let alt_allele_freq = allele_sum as f64 / num_alleles_total as f64;
             let maf = alt_allele_freq.min(1.0 - alt_allele_freq);
-            let maf_threshold = cli_args.maf;
+            // Retrieve the MAF threshold from CLI arguments, defaulting if not provided.
+            let actual_maf_threshold = cli_args.maf.unwrap_or(0.01); // Default to 0.01 if None
 
-            if maf < maf_threshold {
+            if maf < actual_maf_threshold {
                 debug!("Variant at {}:{}:{} (MAF={:.4}) below threshold ({:.4}). Skipping.",
                     record.reference_sequence_name(),
                     record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
                     record.reference_bases(),
-                    maf, maf_threshold);
+                    maf, actual_maf_threshold); // Use actual_maf_threshold for comparison and Display
                 continue;
             }
             
-            let alt_allele_str = alt_bases_obj.as_ref().to_string(); // Removed .as_ref()
+            let alt_allele_str = alt_bases_obj.as_ref().to_string();
             let chrom_str = record.reference_sequence_name().to_string();
             let pos_val = record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
             
