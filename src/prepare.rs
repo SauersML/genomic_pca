@@ -604,11 +604,12 @@ impl MicroarrayDataPreparer {
 
 // --- Genotype Accessor Implementation ---
 /// Accessor for genotype data from a BED file, designed to be used by EigenSNP.
-/// It holds a shared, thread-safe Bed reader instance.
+/// It opens the BED file on each call to `get_standardized_snp_sample_block`
+/// to make sure we have thread safety given the Bed reader's internal structure.
 #[derive(Clone)]
 pub struct MicroarrayGenotypeAccessor {
-    /// Thread-safe, shared Bed reader instance.
-    bed_reader_instance: Arc<Mutex<Bed>>,
+    /// Path to the BED file.
+    bed_file_path: String,
     original_indices_of_qc_samples: Arc<Vec<isize>>,
     original_indices_of_pca_snps: Arc<Vec<usize>>, 
     mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
@@ -619,34 +620,30 @@ pub struct MicroarrayGenotypeAccessor {
 
 impl MicroarrayGenotypeAccessor {
     /// Creates a new MicroarrayGenotypeAccessor.
-    /// Initializes a shared Bed reader instance.
+    /// Stores the path to the BED file and other necessary metadata.
     pub fn new(
-        bed_file_path: String, // Path to the BED file, used to initialize the Bed reader.
+        bed_file_path: String, // Path to the BED file.
         original_indices_of_qc_samples: Arc<Vec<isize>>,
         original_indices_of_pca_snps: Arc<Vec<usize>>,
         mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
         std_devs_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
         num_total_qc_samples: usize,
         num_total_pca_snps: usize,
-    ) -> Result<Self, DataPrepError> { // Return Result to handle Bed::new errors
+    ) -> Self { // Constructor now returns Self directly
         assert_eq!(original_indices_of_qc_samples.len(), num_total_qc_samples, "Accessor: Sample count mismatch");
         assert_eq!(original_indices_of_pca_snps.len(), num_total_pca_snps, "Accessor: D_blocked SNP original index count mismatch");
         assert_eq!(mean_allele1_dosages_for_pca_snps.len(), num_total_pca_snps, "Accessor: Mean dosage vector length mismatch");
         assert_eq!(std_devs_allele1_dosages_for_pca_snps.len(), num_total_pca_snps, "Accessor: StdDev dosage vector length mismatch");
 
-        // Initialize the Bed reader instance once.
-        let bed_instance = Bed::new(&bed_file_path)
-            .map_err(|e| DataPrepError::from(format!("Failed to initialize Bed reader in MicroarrayGenotypeAccessor for '{}': {}", bed_file_path, e)))?;
-
-        Ok(Self {
-            bed_reader_instance: Arc::new(Mutex::new(bed_instance)),
+        Self {
+            bed_file_path, // Store the path
             original_indices_of_qc_samples,
             original_indices_of_pca_snps,
             mean_allele1_dosages_for_pca_snps,
             std_devs_allele1_dosages_for_pca_snps,
             num_total_qc_samples,
             num_total_pca_snps,
-        })
+        }
     }
 
     // --- Public Accessor Methods for MicroarrayGenotypeAccessor ---
