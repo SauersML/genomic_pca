@@ -73,8 +73,10 @@ fn main() -> Result<(), Error> {
     // Configure Rayon thread pool
     let num_threads = cli_args.threads.unwrap_or_else(num_cpus::get);
     info!("Using {} threads for parallel operations.", num_threads);
+    // Configure Rayon thread pool with stack size for worker threads.
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
+        .stack_size(16 * 1024 * 1024) // Set stack size to 16 MB
         .build_global()?;
 
     // --- Workflow Dispatch ---
