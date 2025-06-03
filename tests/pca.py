@@ -132,7 +132,7 @@ def main() -> None:
 
     pc_cols = [f"PC{i+1}" for i in range(k)]
     pd.DataFrame(pcs, columns=pc_cols) \
-        .assign(IID=fam.iid.values) \
+        .assign(SampleID=fam.iid.values) \
         .to_csv(out_dir / "pca.tsv", sep='\t', index=False, float_format="%.6g")
 
     pd.DataFrame({"PC": pc_cols, "Eigenvalue": evals}) \
