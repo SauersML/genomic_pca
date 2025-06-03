@@ -1103,7 +1103,7 @@ impl MicroarrayDataPreparer {
 
             let mut pending_responses_for_batch: Vec<(
                 usize,
-                (String, i32, String, String),
+                (String, i32),
                 flume::Receiver<io_service_infrastructure::IoResponse>,
             )> = Vec::with_capacity(end_snp_idx_for_batch - start_snp_idx_for_batch);
 
@@ -1112,7 +1112,7 @@ impl MicroarrayDataPreparer {
                 let bp_position = self.initial_bim_bp_positions[original_m_idx];
                 // let allele1 = self.initial_bim_allele1_alleles[original_m_idx].clone(); // Removed for dead_code
                 // let allele2 = self.initial_bim_allele2_alleles[original_m_idx].clone(); // Removed for dead_code
-                let pre_fetched_bim_data = (chromosome, bp_position); // Removed allele1, allele2
+                let pre_fetched_bim_data = (chromosome, bp_position);
 
                 let (response_tx, response_rx) = flume::bounded(1);
 
@@ -1230,9 +1230,9 @@ impl MicroarrayDataPreparer {
                                     }
                                     let std_dev_f32 = (variance.sqrt()) as f32;
 
-                                    let (chromosome, bp_pos) = pre_fetched_bim; // Removed allele1, allele2
+                                    let (chromosome, bp_pos) = pre_fetched_bim;
                                     Some(IntermediateSnpDetails {
-                                        original_m_idx, chromosome, bp_position: bp_pos, // allele1, allele2 removed
+                                        original_m_idx, chromosome, bp_position: bp_pos,
                                         mean_allele1_dosage: Some(mean_f32),
                                         std_dev_allele1_dosage: Some(std_dev_f32),
                                     })
