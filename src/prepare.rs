@@ -183,6 +183,8 @@ mod io_service_infrastructure {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    pub(crate) const DEFAULT_IO_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+
     // --- Core Enums and Structs for IoService ---
 
     #[derive(Debug)]
@@ -321,8 +323,17 @@ mod io_service_infrastructure {
                 absolute_max_actors
             );
 
-            let (request_tx, request_rx_shared) = flume::unbounded::<IoRequest>();
-            let (metrics_tx, metrics_rx) = flume::unbounded::<IoTaskMetrics>();
+            // Calculate channel capacities
+            // Ensuring capacity is at least 1 for each channel, even if absolute_max_actors is 0 (defensive)
+            let request_channel_capacity = (absolute_max_actors.saturating_mul(TARGET_QUEUE_LENGTH_PER_ACTOR).saturating_mul(3)).max(1);
+            let metrics_channel_capacity = (absolute_max_actors.saturating_mul(20)).max(1);
+            info!(
+                "IoService: Request channel capacity: {}, Metrics channel capacity: {}",
+                request_channel_capacity, metrics_channel_capacity
+            );
+
+            let (request_tx, request_rx_shared) = flume::bounded::<IoRequest>(request_channel_capacity);
+            let (metrics_tx, metrics_rx) = flume::bounded::<IoTaskMetrics>(metrics_channel_capacity);
 
             let initial_target_actors =
                 std::cmp::min(MIN_OPERATIONAL_IO_ACTORS, absolute_max_actors).max(1);
@@ -367,10 +378,9 @@ mod io_service_infrastructure {
                 warn!("IoService: Not all initial actors ({}) could be spawned. Only {} were launched. This might be due to hitting absolute_max_actors limit early if it's very low.", initial_target_actors, successfully_spawned_count);
                 // Proceed if at least MIN_OPERATIONAL_IO_ACTORS were spawned, otherwise error out.
                 if successfully_spawned_count < MIN_OPERATIONAL_IO_ACTORS
-                    && successfully_spawned_count < initial_target_actors
                 {
                     service_arc.shutdown_all_actors_and_controller_immediately();
-                    return Err(Box::new(DataPrepError::Message(format!("IoService: Failed to spawn enough initial actors (spawned {}, required min {}).", successfully_spawned_count, MIN_OPERATIONAL_IO_ACTORS))) as ThreadSafeStdError);
+                    return Err(Box::new(DataPrepError::Message(format!("IoService: Failed to spawn enough initial actors to meet minimum operational requirement (spawned {}, required min {}).", successfully_spawned_count, MIN_OPERATIONAL_IO_ACTORS))) as ThreadSafeStdError);
                 }
             }
 
@@ -425,7 +435,7 @@ mod io_service_infrastructure {
                 Ok(handle) => {
                     // PoisonError<T> implements Error + Send + Sync + 'static
                     *service_arc.controller_join_handle.lock()
-                        .wrap_err_with_str("IoService: Controller join handle mutex poisoned during spawn.")? = Some(handle);
+                        .map_err(|e| DataPrepError::MutexPoisoned(format!("IoService: Controller join handle mutex poisoned during spawn: {}", e)))? = Some(handle);
                     info!("IoService: Controller thread spawned successfully.");
                 }
                 Err(e) => { // std::io::Error, implements Error + Send + Sync + 'static
@@ -443,13 +453,7 @@ mod io_service_infrastructure {
             &self,
             init_status_tx: Option<flume::Sender<IoResponse>>,
         ) -> bool { // This function's error handling is simple (logs and returns bool)
-            let mut active_actors_guard = self.active_actors.lock().unwrap_or_else(|e| {
-                // Handle poisoned mutex, though in this context it's tricky what to do.
-                // For now, log and proceed as if it's empty or try to recover.
-                // This is a critical error for actor spawning.
-                error!("IoService: Mutex for active_actors poisoned in spawn_new_actor_internal: {}. Attempting to proceed, but state may be inconsistent.", e);
-                e.into_inner() // Get the guard anyway if possible
-            });
+            let mut active_actors_guard = self.active_actors.lock().expect("Mutex poisoned: active_actors lock in spawn_new_actor_internal");
 
             if active_actors_guard.len() >= self.absolute_max_actors {
                 warn!(
@@ -507,14 +511,13 @@ mod io_service_infrastructure {
         }
 
         fn shutdown_one_actor(&self) -> bool {
-            let mut active_actors_guard = self.active_actors.lock().unwrap();
+            let mut active_actors_guard = self.active_actors.lock().expect("Mutex poisoned: active_actors lock in shutdown_one_actor");
             if active_actors_guard.is_empty() {
                 return false;
             }
 
-            // Simple strategy: remove the actor with the largest ID (often the newest).
-            // More sophisticated strategies could be used (e.g., least busy, oldest).
-            if let Some(actor_id_to_remove) = active_actors_guard.keys().max().copied() {
+            // Strategy: remove the actor with the smallest ID (often the oldest).
+            if let Some(actor_id_to_remove) = active_actors_guard.keys().min().copied() {
                 if let Some(handle) = active_actors_guard.remove(&actor_id_to_remove) {
                     info!("IoService: Shutting down actor {}...", actor_id_to_remove);
                     if let Err(e) = handle.shutdown_tx.send(()) {
@@ -540,7 +543,7 @@ mod io_service_infrastructure {
                 .store(true, AtomicOrdering::SeqCst);
             // Controller isn't formally started yet if new() fails early, but signal might be checked if it was.
             // For actors:
-            let mut active_actors_guard = self.active_actors.lock().unwrap();
+            let mut active_actors_guard = self.active_actors.lock().expect("Mutex poisoned: active_actors lock in shutdown_all_actors_and_controller_immediately");
             for (id, handle) in active_actors_guard.drain() {
                 if handle.shutdown_tx.send(()).is_ok() {
                     info!("IoService: Sent emergency shutdown to actor {}", id);
@@ -620,7 +623,7 @@ mod io_service_infrastructure {
 
         loop {
             // Check global shutdown first, as it's the most definitive signal.
-            if global_shutdown_signal.load(AtomicOrdering::Relaxed) {
+            if global_shutdown_signal.load(AtomicOrdering::SeqCst) {
                 info!(
                     "IoActor [{}]: Global shutdown signal detected. Exiting.",
                     actor_id
@@ -716,8 +719,8 @@ mod io_service_infrastructure {
                             let raw_genotypes_i8_result = match read_result {
                                 Ok(array_samples_x_snp) => {
                                     // Expected shape: num_samples x 1
-                                    bytes_read_for_task =
-                                        (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1) / 4; // Approx bytes: (num_samples * 1 snp) / 4 bytes per genotype (packed)
+                                    // Approx bytes based on genotype dimensions: (num_samples * 1 snp + 3) / 4 bytes per genotype (packed BED estimate, ceiling division).
+                                    bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1 + 3) / 4;
                                     Ok(array_samples_x_snp.column(0).to_owned())
                                     // Convert N_qc_samples x 1 to Array1<i8>
                                 }
@@ -757,11 +760,8 @@ mod io_service_infrastructure {
                             let raw_i8_block_result = match read_result {
                                 Ok(array_samples_x_snps) => {
                                     // Expected shape: num_samples x num_snps
-                                    // Approximate bytes read: (num_samples * num_snps) / 4 bytes per genotype
-                                    bytes_read_for_task = (array_samples_x_snps
-                                        .len_of(ndarray::Axis(0))
-                                        * array_samples_x_snps.len_of(ndarray::Axis(1)))
-                                        / 4;
+                                    // Approx bytes based on genotype dimensions: (num_samples * num_snps + 3) / 4 bytes per genotype (packed BED estimate, ceiling division).
+                                    bytes_read_for_task = (array_samples_x_snps.len_of(ndarray::Axis(0)) * array_samples_x_snps.len_of(ndarray::Axis(1)) + 3) / 4;
                                     Ok(array_samples_x_snps.t().as_standard_layout().to_owned())
                                     // Transpose to SNPs x Samples
                                 }
@@ -781,24 +781,24 @@ mod io_service_infrastructure {
                         }
                     }
                     let duration_micros = start_time.elapsed().as_micros() as u64;
-                    if metrics_tx
-                        .send(IoTaskMetrics {
-                            actor_id,
-                            bytes_read: bytes_read_for_task,
-                            duration_micros,
-                            queue_len_at_pickup,
-                        })
-                        .is_err()
-                    {
-                        debug!(
-                            "IoActor [{}]: Failed to send metrics. Controller might be down.",
-                            actor_id
-                        );
+                    match metrics_tx.try_send(IoTaskMetrics {
+                        actor_id,
+                        bytes_read: bytes_read_for_task,
+                        duration_micros,
+                        queue_len_at_pickup,
+                    }) {
+                        Ok(_) => {}
+                        Err(flume::TrySendError::Full(_)) => {
+                            warn!("IoActor [{}]: Metrics channel full. Discarding metric.", actor_id);
+                        }
+                        Err(flume::TrySendError::Disconnected(_)) => {
+                            debug!("IoActor [{}]: Failed to send metrics. Controller might be down.", actor_id);
+                        }
                     }
                 }
                 SelectOutcome::Timeout => {
                     // It's executed if neither channel had a message within the 200ms timeout.
-                    if global_shutdown_signal.load(AtomicOrdering::Relaxed) {
+                    if global_shutdown_signal.load(AtomicOrdering::SeqCst) {
                         info!("IoActor [{}]: Global shutdown signal detected during default check. Exiting.", actor_id);
                         break;
                     }
@@ -824,7 +824,7 @@ mod io_service_infrastructure {
         loop {
             if service_arc
                 .service_shutdown_signal
-                .load(AtomicOrdering::Relaxed)
+                .load(AtomicOrdering::SeqCst)
             {
                 info!("IoController: Shutdown signal detected. Exiting.");
                 break;
@@ -858,10 +858,10 @@ mod io_service_infrastructure {
             if last_adjustment_time.elapsed() >= CONTROLLER_ADJUSTMENT_INTERVAL
                 && last_scaling_event_time.elapsed() >= CONTROLLER_SCALING_COOLDOWN_PERIOD
             {
-                let current_live_actors = service_arc.active_actors.lock().unwrap().len();
+                let current_live_actors = service_arc.active_actors.lock().expect("Mutex poisoned: active_actors lock in controller").len();
                 let prev_target_actors = service_arc
                     .current_target_actors
-                    .load(AtomicOrdering::Relaxed);
+                    .load(AtomicOrdering::Relaxed); // Relaxed is fine for target values, SeqCst for shutdown signals.
                 let current_request_queue_len = service_arc
                     .request_rx_shared_for_actors_and_controller_monitoring
                     .len();
@@ -869,15 +869,17 @@ mod io_service_infrastructure {
                 // Calculate current_avg_throughput_bps from throughput_history
                 let total_bytes_in_window: usize =
                     throughput_history.iter().map(|&(_, bytes)| bytes).sum();
-                let window_duration_actual_secs = throughput_history
-                    .back()
-                    .and_then(|(back_inst, _)| {
-                        throughput_history
-                            .front()
-                            .map(|(front_inst, _)| back_inst.duration_since(*front_inst).as_secs_f64())
-                    })
-                    .unwrap_or(0.0);
-                let current_avg_throughput_bps = if window_duration_actual_secs > 0.0 {
+
+                let window_duration_actual_secs = if throughput_history.len() >= 2 {
+                    // Safe to unwrap front() and back() due to len >= 2 check
+                    let first_timestamp = throughput_history.front().unwrap().0;
+                    let last_timestamp = throughput_history.back().unwrap().0;
+                    last_timestamp.duration_since(first_timestamp).as_secs_f64()
+                } else {
+                    0.0 // Not enough data for a duration
+                };
+
+                let current_avg_throughput_bps = if window_duration_actual_secs > 1e-9 { // Avoid division by zero or very small interval
                     (total_bytes_in_window as f64 / window_duration_actual_secs) as usize
                 } else {
                     0
@@ -916,7 +918,7 @@ mod io_service_infrastructure {
                 if new_target_actors != prev_target_actors {
                     service_arc
                         .current_target_actors
-                        .store(new_target_actors, AtomicOrdering::Relaxed);
+                        .store(new_target_actors, AtomicOrdering::SeqCst);
                     info!(
                         "IoController: Adjusting target actors from {} to {}.",
                         prev_target_actors, new_target_actors
@@ -934,7 +936,7 @@ mod io_service_infrastructure {
                         info!(
                             "IoController: Spawned one new actor to meet target {}. Live: {}",
                             new_target_actors,
-                            service_arc.active_actors.lock().unwrap().len()
+                            service_arc.active_actors.lock().expect("Mutex poisoned: active_actors lock in controller for spawn check").len()
                         );
                     }
                 } else if current_live_actors > new_target_actors {
@@ -942,7 +944,7 @@ mod io_service_infrastructure {
                         info!(
                             "IoController: Shutdown one actor to meet target {}. Live: {}",
                             new_target_actors,
-                            service_arc.active_actors.lock().unwrap().len()
+                            service_arc.active_actors.lock().expect("Mutex poisoned: active_actors lock in controller for shutdown check").len()
                         );
                     }
                 }
@@ -964,18 +966,23 @@ mod io_service_infrastructure {
                 .store(true, AtomicOrdering::SeqCst);
 
             // Shutdown controller thread first
-            if let Some(controller_handle_owned) =
-                self.controller_join_handle.lock().unwrap().take()
-            {
-                info!("IoService: Waiting for controller thread to exit...");
-                match controller_handle_owned.join() {
-                    Ok(_) => info!("IoService: Controller thread successfully joined."),
-                    Err(e) => warn!("IoService: Controller thread panicked: {:?}", e),
+            match self.controller_join_handle.lock() { // .expect("Mutex poisoned: controller_join_handle lock in drop") - not needed due to match
+                Ok(mut guard) => {
+                    if let Some(controller_handle_owned) = guard.take() {
+                        info!("IoService: Waiting for controller thread to exit...");
+                        match controller_handle_owned.join() {
+                            Ok(_) => info!("IoService: Controller thread successfully joined."),
+                            Err(e) => warn!("IoService: Controller thread panicked: {:?}", e),
+                        }
+                    }
+                }
+                Err(poison_err) => {
+                    warn!("IoService: Controller join handle mutex was poisoned during drop: {}. Cannot join controller thread.", poison_err);
                 }
             }
 
             // Shutdown all active actors
-            match self.active_actors.lock() {
+            match self.active_actors.lock() { // .expect("Mutex poisoned: active_actors lock in drop") - not needed due to match
                 Ok(mut active_actors_guard) => {
                     info!(
                         "IoService: Shutting down {} active actors...",
@@ -1004,7 +1011,6 @@ mod io_service_infrastructure {
                 }
                 Err(poison_error) => { // Mutex poisoned
                     warn!("IoService: Active actors mutex poisoned during drop. Some actors may not be cleaned up properly: {}.", poison_error);
-                    // Cannot iterate active_actors_guard if poisoned and cannot recover the guard.
                 }
             }
         }
@@ -1088,8 +1094,7 @@ impl MicroarrayDataPreparer {
         let io_service = io_service_infrastructure::IoService::new(
             bed_file_path_arc, // Pass Arc<String>
             absolute_max_io_actors_from_main,
-        )
-        .wrap_err_with_str("Failed to initialize IoService")?; // Assuming IoService::new now returns E_Original compatible with WrapErr
+        )?; // IoService::new already returns Result<..., ThreadSafeStdError>
 
         info!("IoService initialized successfully for MicroarrayDataPreparer.");
 
@@ -1139,11 +1144,11 @@ impl MicroarrayDataPreparer {
 
         let (
             ld_block_specifications,
-            original_indices_of_pca_snps_vec, // Renamed to indicate it's a Vec
-            mean_allele_dosages_for_pca_snps_arr, // Renamed
-            std_devs_allele_dosages_for_pca_snps_arr, // Renamed
+            original_pca_snp_indices,
+            pca_snp_mean_dosages,
+            pca_snp_std_dev_dosages,
             num_blocked_snps_for_pca,
-        ) = self.map_snps_to_ld_blocks(&final_qc_snps_details)?; // map_snps_to_ld_blocks will be updated to return ThreadSafeStdError
+        ) = self.map_snps_to_ld_blocks(&final_qc_snps_details)?;
         if num_blocked_snps_for_pca == 0 {
             return Err(Box::new(DataPrepError::Message(
                 "No SNPs mapped to LD blocks or all resulting blocks were empty.".to_string(),
@@ -1151,10 +1156,9 @@ impl MicroarrayDataPreparer {
         }
 
         // Wrap data in Arc before passing to accessor
-        let original_indices_of_pca_snps_arc = Arc::new(original_indices_of_pca_snps_vec);
-        let mean_allele_dosages_for_pca_snps_arc = Arc::new(mean_allele_dosages_for_pca_snps_arr);
-        let std_devs_allele_dosages_for_pca_snps_arc =
-            Arc::new(std_devs_allele_dosages_for_pca_snps_arr);
+        let original_indices_of_pca_snps_arc = Arc::new(original_pca_snp_indices);
+        let mean_allele_dosages_for_pca_snps_arc = Arc::new(pca_snp_mean_dosages);
+        let std_devs_allele_dosages_for_pca_snps_arc = Arc::new(pca_snp_std_dev_dosages);
 
         let accessor = MicroarrayGenotypeAccessor::new(
             self.io_service.request_tx.clone(),
@@ -1223,13 +1227,15 @@ impl MicroarrayDataPreparer {
     ) -> Result<(Vec<IntermediateSnpDetails>, usize), ThreadSafeStdError> {
         info!("Starting SNP QC & Standardization Params calculation for {} QC'd samples using IoService.", num_qc_samples);
 
+        // --- Strict 100% Call Rate Policy is enforced ---
+
         if num_qc_samples == 0 {
             debug!("No QC samples provided; skipping SNP QC and returning empty results.");
             return Ok((Vec::new(), 0));
         }
 
         const SNP_BATCH_SIZE: usize = 10000; // Number of SNPs to process per batch
-        const IO_REQUEST_DEFAULT_TIMEOUT: Duration = Duration::from_secs(60); // Timeout for waiting for an actor response for a single SNP.
+        // IO_REQUEST_DEFAULT_TIMEOUT is now io_service_infrastructure::DEFAULT_IO_OPERATION_TIMEOUT
 
         let num_total_initial_snps = self.initial_snp_count_from_bim;
         let num_batches = (num_total_initial_snps + SNP_BATCH_SIZE - 1) / SNP_BATCH_SIZE;
@@ -1301,7 +1307,7 @@ impl MicroarrayDataPreparer {
             let batch_qc_results: Vec<IntermediateSnpDetails> = pending_responses_for_batch
                 .into_par_iter()
                 .filter_map(|(original_m_idx, pre_fetched_bim, response_rx)| {
-                    match response_rx.recv_timeout(IO_REQUEST_DEFAULT_TIMEOUT) {
+                    match response_rx.recv_timeout(io_service_infrastructure::DEFAULT_IO_OPERATION_TIMEOUT) {
                         Ok(io_service_infrastructure::IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }) => {
                             match raw_genotypes_i8_result {
                                 Ok(genotype_array_i8_snp_col) => {
@@ -1313,48 +1319,44 @@ impl MicroarrayDataPreparer {
                                         return None;
                                     }
 
-                                    // --- Call Rate Check ---
+                                    // --- Call Rate Check (Strict 100%) ---
                                     let valid_genotypes: Vec<i8> = genotype_array_i8_snp_col
                                         .iter()
-                                        .filter(|&&g| g != -127i8)
+                                        .filter(|&&g| g != -127i8) // Filter out missing genotypes
                                         .copied()
                                         .collect();
 
                                     let num_valid_genotypes_for_snp = valid_genotypes.len();
 
-                                    if num_qc_samples == 0 { // Should be caught by earlier check in the function, but good for safety.
+                                    if num_qc_samples == 0 { // Should be caught by earlier check in the function.
                                         debug!("SNP QC (idx {}): num_qc_samples is 0, skipping call rate check.", original_m_idx);
                                         return None;
                                     }
 
-                                    let actual_call_rate = num_valid_genotypes_for_snp as f64 / num_qc_samples as f64;
-                                    if actual_call_rate < min_snp_call_rate_thresh {
-                                        debug!("SNP QC (idx {}): Failed call rate check (Rate={:.4}, Threshold={:.4}). Valid genotypes: {}, QC samples: {}.",
-                                               original_m_idx, actual_call_rate, min_snp_call_rate_thresh, num_valid_genotypes_for_snp, num_qc_samples);
+                                    // Enforce strict 100% call rate
+                                    if num_valid_genotypes_for_snp != num_qc_samples {
+                                        debug!("SNP QC (idx {}): Failed 100% call rate. Valid genotypes: {}/{}. Skipping.",
+                                               original_m_idx, num_valid_genotypes_for_snp, num_qc_samples);
                                         return None;
                                     }
+                                    // If we reach here, num_valid_genotypes_for_snp == num_qc_samples.
 
-                                    if num_valid_genotypes_for_snp == 0 {
-                                        debug!("SNP QC (idx {}): No valid genotypes after call rate filtering (Threshold={:.4}). Skipping.", original_m_idx, min_snp_call_rate_thresh);
-                                        return None;
-                                    }
-
-                                    // --- Other QC Checks (MAF, HWE) using valid_genotypes ---
+                                    // --- Other QC Checks (MAF, HWE) using valid_genotypes (which now means all QC samples) ---
                                     let mut allele1_dosage_sum_f64: f64 = 0.0;
-                                    let mut obs_hom_ref: f64 = 0.0; let mut obs_het: f64 = 0.0; let mut obs_hom_alt: f64 = 0.0;
+                                    let mut obs_hom_ref: usize = 0; let mut obs_het: usize = 0; let mut obs_hom_alt: usize = 0;
 
-                                    for &g_val_i8 in valid_genotypes.iter() { // Use valid_genotypes
+                                    for &g_val_i8 in valid_genotypes.iter() { // valid_genotypes contains data for all num_qc_samples
                                         allele1_dosage_sum_f64 += g_val_i8 as f64;
                                         match g_val_i8 {
-                                            0 => obs_hom_ref += 1.0, 1 => obs_het += 1.0, 2 => obs_hom_alt += 1.0,
-                                            _ => { /* Should not happen due to filter */ }
+                                            0 => obs_hom_ref += 1, 1 => obs_het += 1, 2 => obs_hom_alt += 1,
+                                            _ => { /* Should not happen due to filter or prior checks */ }
                                         }
                                     }
 
-                                    let total_alleles_obs_f64 = 2.0 * num_valid_genotypes_for_snp as f64; // Use num_valid_genotypes_for_snp
-                                    let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64; // Ensure total_alleles_obs_f64 is not zero
-                                    if total_alleles_obs_f64 < 1e-9 { // Avoid division by zero if, somehow, num_valid_genotypes is 0 but passed checks
-                                        debug!("SNP QC (idx {}): Total observed alleles is zero after filtering. Skipping MAF check.", original_m_idx);
+                                    let total_alleles_obs_f64 = 2.0 * num_qc_samples as f64; // Based on num_qc_samples as 100% call rate passed
+                                    let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64;
+                                    if total_alleles_obs_f64 < 1e-9 { // Should not happen if num_qc_samples > 0
+                                        debug!("SNP QC (idx {}): Total observed alleles is zero despite 100% call rate. Skipping MAF check.", original_m_idx);
                                         return None;
                                     }
                                     let maf = allele1_freq.min(1.0 - allele1_freq);
@@ -1365,22 +1367,26 @@ impl MicroarrayDataPreparer {
                                     }
 
                                     if max_snp_hwe_p_thresh < 1.0 { // Only test if HWE threshold is restrictive
-                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt, num_valid_genotypes_for_snp as f64); // Use num_valid_genotypes_for_snp
+                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt);
                                         if hwe_p_val <= max_snp_hwe_p_thresh {
                                             debug!("SNP QC (idx {}): Failed HWE check (p-val={:.2e}, threshold={:.2e}).", original_m_idx, hwe_p_val, max_snp_hwe_p_thresh);
                                             return None;
                                         }
                                     }
 
-                                    // --- Calculate Stats (Mean, StdDev) using valid_genotypes ---
-                                    let mean_f32 = (allele1_dosage_sum_f64 / num_valid_genotypes_for_snp as f64) as f32; // Use num_valid_genotypes_for_snp
-                                    let sum_sq_diff_f64: f64 = valid_genotypes.iter() // Use valid_genotypes
+                                    // --- Calculate Stats (Mean, StdDev) using valid_genotypes (i.e., all num_qc_samples) ---
+                                    let mean_f32 = (allele1_dosage_sum_f64 / num_qc_samples as f64) as f32;
+                                    let sum_sq_diff_f64: f64 = valid_genotypes.iter()
                                         .map(|&g_val| (g_val as f64 - mean_f32 as f64).powi(2)).sum();
 
-                                    let variance_denom = (num_valid_genotypes_for_snp.saturating_sub(1) as f64).max(1.0); // Use num_valid_genotypes_for_snp
-                                    let variance = sum_sq_diff_f64 / variance_denom;
+                                    let variance: f64;
+                                    if num_qc_samples >= 2 {
+                                        variance = sum_sq_diff_f64 / (num_qc_samples - 1) as f64;
+                                    } else {
+                                        variance = 0.0; // Variance is 0 if only 0 or 1 sample
+                                    }
 
-                                    if variance <= 1e-9 { // Effectively zero variance
+                                    if variance <= 1e-9 { // Effectively zero variance (catches variance = 0.0 too)
                                         debug!("SNP QC (idx {}): Failed due to near-zero variance ({:.2e}).", original_m_idx, variance);
                                         return None;
                                     }
@@ -1439,11 +1445,11 @@ impl MicroarrayDataPreparer {
         final_qc_snps_details_list: &[IntermediateSnpDetails], // Length D_final
     ) -> Result<
         (
-            Vec<LdBlockSpecification>,
-            Vec<usize>,
-            Array1<f32>,
-            Array1<f32>,
-            usize,
+            Vec<LdBlockSpecification>, // ld_block_specifications
+            Vec<usize>,                // original_pca_snp_indices
+            Array1<f32>,               // pca_snp_mean_dosages
+            Array1<f32>,               // pca_snp_std_dev_dosages
+            usize,                     // num_blocked_snps_for_pca
         ),
         ThreadSafeStdError,
     > {
@@ -1569,9 +1575,9 @@ impl MicroarrayDataPreparer {
         );
         Ok((
             ld_block_specifications,
-            original_indices_of_pca_snps,
-            mean_allele_dosages_for_pca_snps,
-            std_devs_allele_dosages_for_pca_snps,
+            original_indices_of_pca_snps, // This is original_pca_snp_indices inside the function
+            mean_allele_dosages_for_pca_snps, // This is pca_snp_mean_dosages inside the function
+            std_devs_allele_dosages_for_pca_snps, // This is pca_snp_std_dev_dosages inside the function
             num_blocked_snps_for_pca,
         ))
     }
@@ -1635,7 +1641,6 @@ impl MicroarrayDataPreparer {
     /// * `observed_homozygous_allele1_count`: Count of individuals homozygous for Allele 1 (e.g., genotype AA or A1A1).
     /// * `observed_heterozygous_count`: Count of heterozygous individuals (e.g., genotype Aa or A1A2).
     /// * `observed_homozygous_allele2_count`: Count of individuals homozygous for Allele 2 (e.g., genotype aa or A2A2).
-    /// * `total_samples_with_genotypes`: Sum of the three observed genotype counts (`obs_hom_A1 + obs_het + obs_hom_A2`). Must be > 0.
     ///
     /// # Returns
     /// The HWE p-value as an `f64`.
@@ -1651,20 +1656,20 @@ impl MicroarrayDataPreparer {
     /// genotype counts are reasonably large.
     /// For scenarios with very small expected counts, Fisher's exact test might be more appropriate.
     fn calculate_hwe_chi_squared_p_value(
-        observed_homozygous_allele1_count: f64,
-        observed_heterozygous_count: f64,
-        observed_homozygous_allele2_count: f64,
-        total_samples_with_genotypes: f64,
+        observed_homozygous_allele1_count: usize,
+        observed_heterozygous_count: usize,
+        observed_homozygous_allele2_count: usize,
     ) -> f64 {
-        if total_samples_with_genotypes <= 1e-9 {
+        let total_samples_with_genotypes = observed_homozygous_allele1_count + observed_heterozygous_count + observed_homozygous_allele2_count;
+        if total_samples_with_genotypes == 0 {
             // Check if effectively zero samples
-            warn!("HWE Test: Total samples ({}) is effectively zero. Cannot compute HWE p-value. Returning 1.0.", total_samples_with_genotypes);
+            warn!("HWE Test: Total samples (0) is effectively zero. Cannot compute HWE p-value. Returning 1.0.");
             return 1.0;
         }
 
         // Calculate allele counts from genotype counts
-        let count_allele1 = 2.0 * observed_homozygous_allele1_count + observed_heterozygous_count;
-        let count_allele2 = 2.0 * observed_homozygous_allele2_count + observed_heterozygous_count;
+        let count_allele1 = 2.0 * observed_homozygous_allele1_count as f64 + observed_heterozygous_count as f64;
+        let count_allele2 = 2.0 * observed_homozygous_allele2_count as f64 + observed_heterozygous_count as f64;
         let total_alleles_observed = count_allele1 + count_allele2;
 
         // If total_alleles_observed is effectively zero, it implies total_samples_with_genotypes was also zero.
@@ -1687,7 +1692,7 @@ impl MicroarrayDataPreparer {
         // Sanity check: frequencies should sum to 1.
         if (frequency_allele1 + frequency_allele2 - 1.0).abs() > 1e-6 {
             warn!(
-                "HWE Test: Allele frequencies p ({:.4}) and q ({:.4}) do not sum to 1.0. Counts: HomA1={:.0}, Het={:.0}, HomA2={:.0}. Check input counts.",
+                "HWE Test: Allele frequencies p ({:.4}) and q ({:.4}) do not sum to 1.0. Counts: HomA1={}, Het={}, HomA2={}. Check input counts.",
                 frequency_allele1, frequency_allele2,
                 observed_homozygous_allele1_count, observed_heterozygous_count, observed_homozygous_allele2_count
             );
@@ -1696,11 +1701,11 @@ impl MicroarrayDataPreparer {
 
         // Calculate expected genotype counts under HWE
         let expected_homozygous_allele1 =
-            frequency_allele1 * frequency_allele1 * total_samples_with_genotypes;
+            frequency_allele1 * frequency_allele1 * total_samples_with_genotypes as f64;
         let expected_heterozygous =
-            2.0 * frequency_allele1 * frequency_allele2 * total_samples_with_genotypes;
+            2.0 * frequency_allele1 * frequency_allele2 * total_samples_with_genotypes as f64;
         let expected_homozygous_allele2 =
-            frequency_allele2 * frequency_allele2 * total_samples_with_genotypes;
+            frequency_allele2 * frequency_allele2 * total_samples_with_genotypes as f64;
 
         // Calculate Chi-squared statistic: sum ( (Observed - Expected)^2 / Expected )
         let mut chi_squared_statistic: f64 = 0.0;
@@ -1709,9 +1714,9 @@ impl MicroarrayDataPreparer {
         // Term for homozygous Allele 1
         if expected_homozygous_allele1 > MIN_EXPECTED_FOR_DIVISION {
             chi_squared_statistic +=
-                (observed_homozygous_allele1_count - expected_homozygous_allele1).powi(2)
+                (observed_homozygous_allele1_count as f64 - expected_homozygous_allele1).powi(2)
                     / expected_homozygous_allele1;
-        } else if observed_homozygous_allele1_count > MIN_EXPECTED_FOR_DIVISION {
+        } else if (observed_homozygous_allele1_count as f64) > MIN_EXPECTED_FOR_DIVISION {
             // Expected is ~0, but observed is not
             chi_squared_statistic = f64::INFINITY;
         } // If both observed and expected are ~0, term contribution is 0 (chi_squared_statistic remains unchanged).
@@ -1719,10 +1724,10 @@ impl MicroarrayDataPreparer {
         // Term for heterozygous
         if chi_squared_statistic.is_finite() {
             if expected_heterozygous > MIN_EXPECTED_FOR_DIVISION {
-                chi_squared_statistic += (observed_heterozygous_count - expected_heterozygous)
+                chi_squared_statistic += (observed_heterozygous_count as f64 - expected_heterozygous)
                     .powi(2)
                     / expected_heterozygous;
-            } else if observed_heterozygous_count > MIN_EXPECTED_FOR_DIVISION {
+            } else if (observed_heterozygous_count as f64) > MIN_EXPECTED_FOR_DIVISION {
                 chi_squared_statistic = f64::INFINITY;
             }
         }
@@ -1731,15 +1736,15 @@ impl MicroarrayDataPreparer {
         if chi_squared_statistic.is_finite() {
             if expected_homozygous_allele2 > MIN_EXPECTED_FOR_DIVISION {
                 chi_squared_statistic +=
-                    (observed_homozygous_allele2_count - expected_homozygous_allele2).powi(2)
+                    (observed_homozygous_allele2_count as f64 - expected_homozygous_allele2).powi(2)
                         / expected_homozygous_allele2;
-            } else if observed_homozygous_allele2_count > MIN_EXPECTED_FOR_DIVISION {
+            } else if (observed_homozygous_allele2_count as f64) > MIN_EXPECTED_FOR_DIVISION {
                 chi_squared_statistic = f64::INFINITY;
             }
         }
 
         if chi_squared_statistic.is_nan() {
-            warn!("HWE Test: Chi-squared statistic is NaN. This can occur with extreme deviations or problematic inputs. Counts: HomA1={:.0}, Het={:.0}, HomA2={:.0}. Freqs: p={:.4}, q={:.4}. Exp: E_HomA1={:.2}, E_Het={:.2}, E_HomA2={:.2}. Returning p=1.0.",
+            warn!("HWE Test: Chi-squared statistic is NaN. This can occur with extreme deviations or problematic inputs. Counts: HomA1={}, Het={}, HomA2={}. Freqs: p={:.4}, q={:.4}. Exp: E_HomA1={:.2}, E_Het={:.2}, E_HomA2={:.2}. Returning p=1.0.",
                 observed_homozygous_allele1_count, observed_heterozygous_count, observed_homozygous_allele2_count,
                 frequency_allele1, frequency_allele2,
                 expected_homozygous_allele1, expected_heterozygous, expected_homozygous_allele2);
@@ -1903,13 +1908,13 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                 response_tx,
             };
 
-            const ACCESSOR_IO_TIMEOUT: Duration = Duration::from_secs(60);
+            // const ACCESSOR_IO_TIMEOUT: Duration = Duration::from_secs(60); // Now using centralized constant
             // flume::SendTimeoutError<T> is Error + Send + Sync + 'static
-            self.io_request_tx.send_timeout(request, ACCESSOR_IO_TIMEOUT)
+            self.io_request_tx.send_timeout(request, io_service_infrastructure::DEFAULT_IO_OPERATION_TIMEOUT)
                 .wrap_err_with_str("Failed to send SnpBlockForEigen request to IoService")?;
 
             // flume::RecvTimeoutError is Error + Send + Sync + 'static
-            match response_rx.recv_timeout(ACCESSOR_IO_TIMEOUT)
+            match response_rx.recv_timeout(io_service_infrastructure::DEFAULT_IO_OPERATION_TIMEOUT)
                 .wrap_err_with_str("Failed to receive SnpBlockForEigen response from IoService")? {
                 io_service_infrastructure::IoResponse::SnpBlockData { raw_i8_block_result } => {
                     // raw_i8_block_result is Result<Array2<i8>, String>
