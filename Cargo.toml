@@ -27,7 +27,7 @@ anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
 efficient_pca = { git = "https://github.com/SauersML/efficient_pca.git", branch = "main", features = ["enable-eigensnp-diagnostics"] }
 env_logger = "0.11.8"
-flume = "0.11.1"
+flume = { version = "0.11.1", features = ["select"] }
 indicatif = "0.17.11"
 libc = "0.2.172"
 log = "0.4.27"
