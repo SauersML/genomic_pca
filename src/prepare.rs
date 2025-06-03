@@ -106,25 +106,29 @@ impl<T> From<PoisonError<T>> for DataPrepError {
 pub trait WrapErr<T, E_Original>
 where E_Original: std::error::Error + Send + Sync + 'static
 {
-    fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, DataPrepError>;
-    fn wrap_err_with_str(self, context: &str) -> Result<T, DataPrepError>;
+    fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, ThreadSafeStdError>;
+    fn wrap_err_with_str(self, context: &str) -> Result<T, ThreadSafeStdError>;
 }
 
 impl<T, E_Original> WrapErr<T, E_Original> for Result<T, E_Original>
 where
     E_Original: std::error::Error + Send + Sync + 'static,
 {
-    fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, DataPrepError> {
-        self.map_err(|e_original| DataPrepError::Contextual {
-            context: context_fn(),
-            source: Box::new(e_original),
+    fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, ThreadSafeStdError> {
+        self.map_err(|e_original| {
+            Box::new(DataPrepError::Contextual {
+                context: context_fn(),
+                source: Box::new(e_original),
+            }) as ThreadSafeStdError
         })
     }
 
-    fn wrap_err_with_str(self, context: &str) -> Result<T, DataPrepError> {
-        self.map_err(|e_original| DataPrepError::Contextual {
-            context: context.to_string(),
-            source: Box::new(e_original),
+    fn wrap_err_with_str(self, context: &str) -> Result<T, ThreadSafeStdError> {
+        self.map_err(|e_original| {
+            Box::new(DataPrepError::Contextual {
+                context: context.to_string(),
+                source: Box::new(e_original),
+            }) as ThreadSafeStdError
         })
     }
 }
@@ -311,7 +315,7 @@ mod io_service_infrastructure {
         pub(crate) fn new(
             bed_file_path: Arc<String>,
             absolute_max_actors: usize,
-        ) -> Result<Arc<Self>, DataPrepError> {
+        ) -> Result<Arc<Self>, ThreadSafeStdError> {
             info!(
                 "IoService: Initializing with absolute_max_actors: {}",
                 absolute_max_actors
@@ -366,17 +370,19 @@ mod io_service_infrastructure {
                     && successfully_spawned_count < initial_target_actors
                 {
                     service_arc.shutdown_all_actors_and_controller_immediately();
-                    return Err(DataPrepError::Message(format!("IoService: Failed to spawn enough initial actors (spawned {}, required min {}).", successfully_spawned_count, MIN_OPERATIONAL_IO_ACTORS)));
+                    return Err(Box::new(DataPrepError::Message(format!("IoService: Failed to spawn enough initial actors (spawned {}, required min {}).", successfully_spawned_count, MIN_OPERATIONAL_IO_ACTORS))) as ThreadSafeStdError);
                 }
             }
 
             for i in 0..successfully_spawned_count {
-                match init_status_rx.recv_timeout(Duration::from_secs(10)) {
-                    Ok(IoResponse::ActorInitStatus {
+                // flume::RecvTimeoutError implements Error + Send + Sync + 'static
+                match init_status_rx.recv_timeout(Duration::from_secs(10))
+                    .wrap_err_with_context(|| format!("IoService: Timed out waiting for actor {} init to report status.", i))? {
+                    IoResponse::ActorInitStatus {
                         actor_id,
                         success,
                         error_msg,
-                    }) => {
+                    } => {
                         if !success {
                             let err_message = error_msg.unwrap_or_default();
                             error!(
@@ -385,30 +391,22 @@ mod io_service_infrastructure {
                                 err_message
                             );
                             service_arc.shutdown_all_actors_and_controller_immediately();
-                            return Err(DataPrepError::Message(format!(
+                            return Err(Box::new(DataPrepError::Message(format!(
                                 "IoService: Actor {} failed to initialize. Cause: {}",
                                 actor_id, err_message
-                            )));
+                            ))) as ThreadSafeStdError);
                         }
                         info!(
                             "IoService: Initial actor {} reported successful initialization.",
                             actor_id
                         );
                     }
-                    Ok(_) => {
+                    _ => { // Catch any other IoResponse variant
                         error!("IoService: Received unexpected message type on init channel from actor during startup sequence. Actor index {}.", i);
                         service_arc.shutdown_all_actors_and_controller_immediately();
-                        return Err(DataPrepError::Message(
+                        return Err(Box::new(DataPrepError::Message(
                             "IoService: Unexpected message during actor init.".to_string(),
-                        ));
-                    }
-                    Err(e) => { // flume::RecvTimeoutError
-                        error!("IoService: Timed out waiting for initial actor {} to report status: {}", i, e);
-                        service_arc.shutdown_all_actors_and_controller_immediately();
-                        return Err(DataPrepError::from(e).wrap_err_with_context(||format!(
-                            "IoService: Timeout waiting for actor {} init.",
-                            i
-                        )));
+                        )) as ThreadSafeStdError);
                     }
                 }
             }
@@ -425,13 +423,15 @@ mod io_service_infrastructure {
                 .spawn(move || io_service_controller_thread(controller_service_arc_clone))
             {
                 Ok(handle) => {
-                    *service_arc.controller_join_handle.lock()? = Some(handle); // Use From<PoisonError> for DataPrepError
+                    // PoisonError<T> implements Error + Send + Sync + 'static
+                    *service_arc.controller_join_handle.lock()
+                        .wrap_err_with_str("IoService: Controller join handle mutex poisoned during spawn.")? = Some(handle);
                     info!("IoService: Controller thread spawned successfully.");
                 }
-                Err(e) => { // std::io::Error
+                Err(e) => { // std::io::Error, implements Error + Send + Sync + 'static
                     error!("IoService: Failed to spawn controller thread: {}", e);
                     service_arc.shutdown_all_actors_and_controller_immediately();
-                    return Err(DataPrepError::from(e).wrap_err_with_str("Failed to spawn controller thread"));
+                    return Err(e).wrap_err_with_str("Failed to spawn controller thread");
                 }
             }
 
@@ -1035,89 +1035,47 @@ impl MicroarrayDataPreparer {
 
         {
             // Scope for bed_for_metadata to ensure it's dropped
-            let mut bed_for_metadata = Bed::new(&config.bed_file_path).map_err(|e| {
-                Box::new(DataPrepError::from(format!(
-                    "Failed to open BED file '{}' for initial metadata: {}",
-                    config.bed_file_path, e
-                ))) as ThreadSafeStdError
-            })?;
+            let mut bed_for_metadata = Bed::new(&config.bed_file_path)
+                .wrap_err_with_context(|| format!("Failed to open BED file '{}' for initial metadata", config.bed_file_path))?;
 
             initial_bim_allele1_alleles = Arc::new(
                 bed_for_metadata
                     .allele_1()
-                    .map_err(|e| {
-                        Box::new(DataPrepError::from(format!(
-                            "Failed to read allele_1 from BIM for initial metadata: {}",
-                            e
-                        ))) as ThreadSafeStdError
-                    })?
+                    .wrap_err_with_str("Failed to read allele_1 from BIM for initial metadata")?
                     .to_owned(),
             );
             initial_bim_allele2_alleles = Arc::new(
                 bed_for_metadata
                     .allele_2()
-                    .map_err(|e| {
-                        Box::new(DataPrepError::from(format!(
-                            "Failed to read allele_2 from BIM for initial metadata: {}",
-                            e
-                        ))) as ThreadSafeStdError
-                    })?
+                    .wrap_err_with_str("Failed to read allele_2 from BIM for initial metadata")?
                     .to_owned(),
             );
             initial_bim_sids = Arc::new(
                 bed_for_metadata
                     .sid()
-                    .map_err(|e| {
-                        Box::new(DataPrepError::from(format!(
-                            "Failed to read SIDs from BIM for initial metadata: {}",
-                            e
-                        ))) as ThreadSafeStdError
-                    })?
+                    .wrap_err_with_str("Failed to read SIDs from BIM for initial metadata")?
                     .to_owned(),
             );
             initial_bim_chromosomes = Arc::new(
                 bed_for_metadata
                     .chromosome()
-                    .map_err(|e| {
-                        Box::new(DataPrepError::from(format!(
-                            "Failed to read chromosomes from BIM for initial metadata: {}",
-                            e
-                        ))) as ThreadSafeStdError
-                    })?
+                    .wrap_err_with_str("Failed to read chromosomes from BIM for initial metadata")?
                     .to_owned(),
             );
             initial_bim_bp_positions = Arc::new(
                 bed_for_metadata
                     .bp_position()
-                    .map_err(|e| {
-                        Box::new(DataPrepError::from(format!(
-                            "Failed to read bp_positions from BIM for initial metadata: {}",
-                            e
-                        ))) as ThreadSafeStdError
-                    })?
+                    .wrap_err_with_str("Failed to read bp_positions from BIM for initial metadata")?
                     .to_owned(),
             );
-            initial_snp_count_from_bim = bed_for_metadata.sid_count().map_err(|e| {
-                Box::new(DataPrepError::from(format!(
-                    "Failed to read sid_count for initial metadata: {}",
-                    e
-                ))) as ThreadSafeStdError
-            })?;
-            initial_sample_count_from_fam = bed_for_metadata.iid_count().map_err(|e| {
-                Box::new(DataPrepError::from(format!(
-                    "Failed to read iid_count for initial metadata: {}",
-                    e
-                ))) as ThreadSafeStdError
-            })?;
+            initial_snp_count_from_bim = bed_for_metadata.sid_count()
+                .wrap_err_with_str("Failed to read sid_count for initial metadata")?;
+            initial_sample_count_from_fam = bed_for_metadata.iid_count()
+                .wrap_err_with_str("Failed to read iid_count for initial metadata")?;
             initial_sample_ids_from_fam = Arc::new(
                 bed_for_metadata
                     .iid()
-                    .map_err(|e| {
-                        Box::new(DataPrepError::from(format!(
-                            "Failed to read IIDs from FAM for initial metadata: {}",
-                            e
-                        ))) as ThreadSafeStdError
-                    })?
+                    .wrap_err_with_str("Failed to read IIDs from FAM for initial metadata")?
                     .to_owned(),
             );
 
@@ -1131,12 +1089,7 @@ impl MicroarrayDataPreparer {
             bed_file_path_arc, // Pass Arc<String>
             absolute_max_io_actors_from_main,
         )
-        .map_err(|e_ios| {
-            Box::new(DataPrepError::from(format!(
-                "Failed to initialize IoService: {}",
-                e_ios
-            ))) as ThreadSafeStdError
-        })?;
+        .wrap_err_with_str("Failed to initialize IoService")?; // Assuming IoService::new now returns E_Original compatible with WrapErr
 
         info!("IoService initialized successfully for MicroarrayDataPreparer.");
 
@@ -1170,7 +1123,7 @@ impl MicroarrayDataPreparer {
 
         let (original_indices_of_qc_samples_vec, num_qc_samples) = self.perform_sample_qc()?;
         if num_qc_samples == 0 {
-            return Err(DataPrepError::from("No samples passed QC.").into());
+            return Err(Box::new(DataPrepError::Message("No samples passed QC.".to_string())) as ThreadSafeStdError);
         }
 
         // Arc this up for perform_snp_qc_and_calc_std_params and MicroarrayGenotypeAccessor
@@ -1181,7 +1134,7 @@ impl MicroarrayDataPreparer {
             num_qc_samples,
         )?;
         if final_qc_snps_details.is_empty() {
-            return Err(DataPrepError::from("No SNPs passed all QC filters.").into());
+            return Err(Box::new(DataPrepError::Message("No SNPs passed all QC filters.".to_string())) as ThreadSafeStdError);
         }
 
         let (
@@ -1190,12 +1143,11 @@ impl MicroarrayDataPreparer {
             mean_allele_dosages_for_pca_snps_arr, // Renamed
             std_devs_allele_dosages_for_pca_snps_arr, // Renamed
             num_blocked_snps_for_pca,
-        ) = self.map_snps_to_ld_blocks(&final_qc_snps_details)?;
+        ) = self.map_snps_to_ld_blocks(&final_qc_snps_details)?; // map_snps_to_ld_blocks will be updated to return ThreadSafeStdError
         if num_blocked_snps_for_pca == 0 {
-            return Err(DataPrepError::from(
-                "No SNPs mapped to LD blocks or all resulting blocks were empty.",
-            )
-            .into());
+            return Err(Box::new(DataPrepError::Message(
+                "No SNPs mapped to LD blocks or all resulting blocks were empty.".to_string(),
+            )) as ThreadSafeStdError);
         }
 
         // Wrap data in Arc before passing to accessor
@@ -1205,13 +1157,13 @@ impl MicroarrayDataPreparer {
             Arc::new(std_devs_allele_dosages_for_pca_snps_arr);
 
         let accessor = MicroarrayGenotypeAccessor::new(
-            original_indices_of_qc_samples_arc.clone(),
-            original_indices_of_pca_snps_arc,
-            mean_allele_dosages_for_pca_snps_arc, // Mean first, then StdDev
-            std_devs_allele_dosages_for_pca_snps_arc,
-            num_qc_samples, // num_total_qc_samples first
-            num_blocked_snps_for_pca, // then num_total_pca_snps (D_blocked)
             self.io_service.request_tx.clone(),
+            original_indices_of_qc_samples_arc.clone(),
+            num_qc_samples,
+            original_indices_of_pca_snps_arc,
+            num_blocked_snps_for_pca,
+            mean_allele_dosages_for_pca_snps_arc,
+            std_devs_allele_dosages_for_pca_snps_arc,
         );
         info!("Data preparation pipeline complete. Ready for EigenSNP. N_samples_qc={}, D_snps_blocked_for_pca={}", num_qc_samples, num_blocked_snps_for_pca);
         Ok((
@@ -1231,7 +1183,8 @@ impl MicroarrayDataPreparer {
             self.config.sample_ids_to_keep_file_path
         {
             info!("Reading sample list to keep from: {}", path);
-            let file_content = std::fs::read_to_string(path).map_err(DataPrepError::from)?;
+            let file_content = std::fs::read_to_string(path)
+                .wrap_err_with_context(|| format!("Failed to read sample ID file '{}'", path))?;
             let ids_to_keep_set: HashSet<String> = file_content.lines().map(String::from).collect();
             self.initial_sample_ids_from_fam
                 .iter()
@@ -1320,9 +1273,9 @@ impl MicroarrayDataPreparer {
                 };
 
                 if let Err(e_send) = self.io_service.request_tx.send(request) {
-                    let err_msg = format!("Failed to send SNP QC request for original_m_idx {} (batch {}): {}. SNP QC cannot proceed.", original_m_idx, batch_idx, e_send);
-                    error!("{}", err_msg);
-                    return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+                    // e_send is flume::SendError. It's Error + Send + Sync + 'static.
+                    return Err(e_send)
+                        .wrap_err_with_context(|| format!("Failed to send SNP QC request for original_m_idx {} (batch {}). SNP QC cannot proceed.", original_m_idx, batch_idx));
                 }
                 pending_responses_for_batch.push((
                     original_m_idx,
@@ -1352,34 +1305,58 @@ impl MicroarrayDataPreparer {
                         Ok(io_service_infrastructure::IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }) => {
                             match raw_genotypes_i8_result {
                                 Ok(genotype_array_i8_snp_col) => {
-                                    // --- Strict Missing Data Excision ---
-                                    if genotype_array_i8_snp_col.iter().any(|&g_val| g_val == -127i8) {
-                                        debug!("SNP QC (idx {}): Failed due to missing genotypes (-127i8) among QC'd samples.", original_m_idx);
-                                        return None;
-                                    }
-                                    // Call rate is effectively 1.0 if no missing data was found for num_qc_samples.
-                                    // If genotype_array_i8_snp_col.len() != num_qc_samples, it implies an issue.
-                                    // For now, assume IoService actor correctly fetched data for all qc_sample_indices.
+                                    // Ensure IoService actor fetched data for all qc_sample_indices.
+                                    // This check remains important.
                                     if genotype_array_i8_snp_col.len() != num_qc_samples {
                                         warn!("SNP QC (idx {}): Genotype array length ({}) does not match num_qc_samples ({}). Skipping.",
                                               original_m_idx, genotype_array_i8_snp_col.len(), num_qc_samples);
                                         return None;
                                     }
 
-                                    // --- Other QC Checks (MAF, HWE) ---
+                                    // --- Call Rate Check ---
+                                    let valid_genotypes: Vec<i8> = genotype_array_i8_snp_col
+                                        .iter()
+                                        .filter(|&&g| g != -127i8)
+                                        .copied()
+                                        .collect();
+
+                                    let num_valid_genotypes_for_snp = valid_genotypes.len();
+
+                                    if num_qc_samples == 0 { // Should be caught by earlier check in the function, but good for safety.
+                                        debug!("SNP QC (idx {}): num_qc_samples is 0, skipping call rate check.", original_m_idx);
+                                        return None;
+                                    }
+
+                                    let actual_call_rate = num_valid_genotypes_for_snp as f64 / num_qc_samples as f64;
+                                    if actual_call_rate < min_snp_call_rate_thresh {
+                                        debug!("SNP QC (idx {}): Failed call rate check (Rate={:.4}, Threshold={:.4}). Valid genotypes: {}, QC samples: {}.",
+                                               original_m_idx, actual_call_rate, min_snp_call_rate_thresh, num_valid_genotypes_for_snp, num_qc_samples);
+                                        return None;
+                                    }
+
+                                    if num_valid_genotypes_for_snp == 0 {
+                                        debug!("SNP QC (idx {}): No valid genotypes after call rate filtering (Threshold={:.4}). Skipping.", original_m_idx, min_snp_call_rate_thresh);
+                                        return None;
+                                    }
+
+                                    // --- Other QC Checks (MAF, HWE) using valid_genotypes ---
                                     let mut allele1_dosage_sum_f64: f64 = 0.0;
                                     let mut obs_hom_ref: f64 = 0.0; let mut obs_het: f64 = 0.0; let mut obs_hom_alt: f64 = 0.0;
 
-                                    for &g_val_i8 in genotype_array_i8_snp_col.iter() {
+                                    for &g_val_i8 in valid_genotypes.iter() { // Use valid_genotypes
                                         allele1_dosage_sum_f64 += g_val_i8 as f64;
                                         match g_val_i8 {
                                             0 => obs_hom_ref += 1.0, 1 => obs_het += 1.0, 2 => obs_hom_alt += 1.0,
-                                            _ => { /* Should not happen if -127 was checked */ }
+                                            _ => { /* Should not happen due to filter */ }
                                         }
                                     }
 
-                                    let total_alleles_obs_f64 = 2.0 * num_qc_samples as f64;
-                                    let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64;
+                                    let total_alleles_obs_f64 = 2.0 * num_valid_genotypes_for_snp as f64; // Use num_valid_genotypes_for_snp
+                                    let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64; // Ensure total_alleles_obs_f64 is not zero
+                                    if total_alleles_obs_f64 < 1e-9 { // Avoid division by zero if, somehow, num_valid_genotypes is 0 but passed checks
+                                        debug!("SNP QC (idx {}): Total observed alleles is zero after filtering. Skipping MAF check.", original_m_idx);
+                                        return None;
+                                    }
                                     let maf = allele1_freq.min(1.0 - allele1_freq);
 
                                     if maf < min_snp_maf_thresh || allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
@@ -1388,19 +1365,19 @@ impl MicroarrayDataPreparer {
                                     }
 
                                     if max_snp_hwe_p_thresh < 1.0 { // Only test if HWE threshold is restrictive
-                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt, num_qc_samples as f64);
+                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt, num_valid_genotypes_for_snp as f64); // Use num_valid_genotypes_for_snp
                                         if hwe_p_val <= max_snp_hwe_p_thresh {
                                             debug!("SNP QC (idx {}): Failed HWE check (p-val={:.2e}, threshold={:.2e}).", original_m_idx, hwe_p_val, max_snp_hwe_p_thresh);
                                             return None;
                                         }
                                     }
 
-                                    // --- Calculate Stats (Mean, StdDev) ---
-                                    let mean_f32 = (allele1_dosage_sum_f64 / num_qc_samples as f64) as f32;
-                                    let sum_sq_diff_f64: f64 = genotype_array_i8_snp_col.iter()
+                                    // --- Calculate Stats (Mean, StdDev) using valid_genotypes ---
+                                    let mean_f32 = (allele1_dosage_sum_f64 / num_valid_genotypes_for_snp as f64) as f32; // Use num_valid_genotypes_for_snp
+                                    let sum_sq_diff_f64: f64 = valid_genotypes.iter() // Use valid_genotypes
                                         .map(|&g_val| (g_val as f64 - mean_f32 as f64).powi(2)).sum();
 
-                                    let variance_denom = (num_qc_samples.saturating_sub(1) as f64).max(1.0);
+                                    let variance_denom = (num_valid_genotypes_for_snp.saturating_sub(1) as f64).max(1.0); // Use num_valid_genotypes_for_snp
                                     let variance = sum_sq_diff_f64 / variance_denom;
 
                                     if variance <= 1e-9 { // Effectively zero variance
@@ -1468,7 +1445,7 @@ impl MicroarrayDataPreparer {
             Array1<f32>,
             usize,
         ),
-        DataPrepError, // Changed to DataPrepError
+        ThreadSafeStdError,
     > {
         info!(
             "Mapping {} final QC'd SNPs to LD blocks from '{}'...",
@@ -1536,23 +1513,23 @@ impl MicroarrayDataPreparer {
             if let Some(info) = final_qc_snps_map.get(&orig_m_idx_in_d_blocked) {
                 mean_allele_dosages_for_pca_snps_vec.push(info.mean_allele1_dosage.ok_or_else(
                     || {
-                        DataPrepError::Message(format!(
+                        Box::new(DataPrepError::Message(format!(
                             "Mean dosage missing for QC'd SNP original_idx {}",
                             orig_m_idx_in_d_blocked
-                        ))
+                        ))) as ThreadSafeStdError
                     },
                 )?);
                 std_devs_allele_dosages_for_pca_snps_vec.push(
                     info.std_dev_allele1_dosage.ok_or_else(|| {
-                        DataPrepError::Message(format!(
+                        Box::new(DataPrepError::Message(format!(
                             "StdDev dosage missing for QC'd SNP original_idx {}",
                             orig_m_idx_in_d_blocked
-                        ))
+                        ))) as ThreadSafeStdError
                     })?,
                 );
             } else {
                 // This indicates a logic error in the calling code or data preparation steps.
-                return Err(DataPrepError::Message(format!("Internal error: SNP with original index {} from D_blocked set not found in final_qc_snps_map during mu/sigma finalization.", orig_m_idx_in_d_blocked)));
+                return Err(Box::new(DataPrepError::Message(format!("Internal error: SNP with original index {} from D_blocked set not found in final_qc_snps_map during mu/sigma finalization.", orig_m_idx_in_d_blocked))) as ThreadSafeStdError);
             }
         }
         let mean_allele_dosages_for_pca_snps =
@@ -1599,7 +1576,7 @@ impl MicroarrayDataPreparer {
         ))
     }
 
-    fn parse_ld_block_file(&self) -> Result<Vec<(String, i32, i32, String)>, DataPrepError> { // Changed to DataPrepError
+    fn parse_ld_block_file(&self) -> Result<Vec<(String, i32, i32, String)>, ThreadSafeStdError> {
         use std::fs::File;
         use std::io::{BufRead, BufReader};
         info!("Parsing LD block file: {}", self.config.ld_block_file_path);
@@ -1828,25 +1805,25 @@ impl MicroarrayDataPreparer {
 /// It uses an IoService to request data from the BED file.
 #[derive(Clone)]
 pub struct MicroarrayGenotypeAccessor {
+    io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>,
     original_indices_of_qc_samples: Arc<Vec<isize>>,
+    num_total_qc_samples: usize,
     original_indices_of_pca_snps: Arc<Vec<usize>>,
+    num_total_pca_snps: usize, // D_blocked (number of SNPs after QC and LD blocking)
     mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
     std_devs_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
-    num_total_qc_samples: usize,
-    num_total_pca_snps: usize, // D_blocked (number of SNPs after QC and LD blocking)
-    io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>,
 }
 
 impl MicroarrayGenotypeAccessor {
     /// Creates a new MicroarrayGenotypeAccessor.
     pub fn new(
+        io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>,
         original_indices_of_qc_samples: Arc<Vec<isize>>,
+        num_total_qc_samples: usize,
         original_indices_of_pca_snps: Arc<Vec<usize>>,
+        num_total_pca_snps: usize,
         mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
         std_devs_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
-        num_total_qc_samples: usize,
-        num_total_pca_snps: usize,
-        io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>,
     ) -> Self {
         assert_eq!(
             original_indices_of_qc_samples.len(),
@@ -1870,13 +1847,13 @@ impl MicroarrayGenotypeAccessor {
         );
 
         Self {
+            io_request_tx,
             original_indices_of_qc_samples,
+            num_total_qc_samples,
             original_indices_of_pca_snps,
+            num_total_pca_snps,
             mean_allele1_dosages_for_pca_snps,
             std_devs_allele1_dosages_for_pca_snps,
-            num_total_qc_samples,
-            num_total_pca_snps,
-            io_request_tx,
         }
     }
 
@@ -1902,7 +1879,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
         pca_snp_ids_to_fetch: &[PcaSnpId], // Indices 0..D_blocked-1
         qc_sample_ids_to_fetch: &[QcSampleId],
     ) -> Result<Array2<f32>, ThreadSafeStdError> { // Must return ThreadSafeStdError due to trait
-        let result_internal: Result<Array2<f32>, DataPrepError> = (|| { // IIFE to use ? for DataPrepError
+        let result_internal: Result<Array2<f32>, ThreadSafeStdError> = (|| { // IIFE now returns ThreadSafeStdError
             let num_requested_snps = pca_snp_ids_to_fetch.len();
             let num_requested_samples = qc_sample_ids_to_fetch.len();
 
@@ -1927,20 +1904,26 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
             };
 
             const ACCESSOR_IO_TIMEOUT: Duration = Duration::from_secs(60);
-            self.io_request_tx.send_timeout(request, ACCESSOR_IO_TIMEOUT)?; // Converts flume::SendTimeoutError via From
+            // flume::SendTimeoutError<T> is Error + Send + Sync + 'static
+            self.io_request_tx.send_timeout(request, ACCESSOR_IO_TIMEOUT)
+                .wrap_err_with_str("Failed to send SnpBlockForEigen request to IoService")?;
 
-            match response_rx.recv_timeout(ACCESSOR_IO_TIMEOUT)? { // Converts flume::RecvTimeoutError via From
+            // flume::RecvTimeoutError is Error + Send + Sync + 'static
+            match response_rx.recv_timeout(ACCESSOR_IO_TIMEOUT)
+                .wrap_err_with_str("Failed to receive SnpBlockForEigen response from IoService")? {
                 io_service_infrastructure::IoResponse::SnpBlockData { raw_i8_block_result } => {
                     // raw_i8_block_result is Result<Array2<i8>, String>
                     // The String error comes from the actor if bed_reader fails.
+                    // Convert String to a ThreadSafeStdError.
                     let raw_dosages_snps_by_samples_i8_array2 = raw_i8_block_result
-                        .map_err(DataPrepError::Message)?;
+                        .map_err(|s| Box::new(DataPrepError::Message(s)) as ThreadSafeStdError)?;
 
                     if raw_dosages_snps_by_samples_i8_array2.nrows() != num_requested_snps
                         || raw_dosages_snps_by_samples_i8_array2.ncols() != num_requested_samples {
-                        return Err(DataPrepError::Message(format!("IoService returned SnpBlockData with unexpected dimensions. Expected: {}x{}, Got: {}x{}",
+                        // Return a new ThreadSafeStdError
+                        return Err(Box::new(DataPrepError::Message(format!("IoService returned SnpBlockData with unexpected dimensions. Expected: {}x{}, Got: {}x{}",
                                               num_requested_snps, num_requested_samples,
-                                              raw_dosages_snps_by_samples_i8_array2.nrows(), raw_dosages_snps_by_samples_i8_array2.ncols())));
+                                              raw_dosages_snps_by_samples_i8_array2.nrows(), raw_dosages_snps_by_samples_i8_array2.ncols()))) as ThreadSafeStdError);
                     }
 
                     let mut standardized_block_f32 = Array2::<f32>::uninit(raw_dosages_snps_by_samples_i8_array2.raw_dim());
@@ -1955,8 +1938,8 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                             for i_req_sample in 0..num_requested_samples {
                                 let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
                                 if raw_dosage_val_i8 == -127i8 {
-                                    return Err(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
-                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0)));
+                                    return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0))) as ThreadSafeStdError);
                                 }
                                 unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(0.0f32); }
                             }
@@ -1964,8 +1947,8 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                             for i_req_sample in 0..num_requested_samples {
                                 let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
                                 if raw_dosage_val_i8 == -127i8 {
-                                     return Err(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
-                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0)));
+                                     return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0))) as ThreadSafeStdError);
                                 }
                                 let standardized_val = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
                                 unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(standardized_val); }
@@ -1974,11 +1957,12 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                     }
                     Ok(unsafe { standardized_block_f32.assume_init() })
                 }
-                unexpected_response => Err(DataPrepError::Message(format!("Received unexpected IoResponse type from IoService: {:?}. Expected SnpBlockData.", unexpected_response))),
+                unexpected_response => Err(Box::new(DataPrepError::Message(format!("Received unexpected IoResponse type from IoService: {:?}. Expected SnpBlockData.", unexpected_response))) as ThreadSafeStdError),
             }
         })();
 
-        result_internal.map_err(|e| Box::new(e) as ThreadSafeStdError)
+        // The IIFE now returns ThreadSafeStdError directly if internal WrapErr calls are used.
+        result_internal
     }
 
     fn num_pca_snps(&self) -> usize {
