@@ -534,17 +534,20 @@ mod io_service_infrastructure {
                                 .iid_index(qc_sample_indices_slice) // Use the slice with an extended lifetime
                                 .i8().count_a1(); // Read as i8, count allele1
                             
-                            // The read_options_builder is consumed by the .read() method.
-                            let raw_genotypes_i8_result = match read_options_builder.read(&mut bed_reader_instance) {
-                                Ok(array_samples_x_snp) => { // Expected shape: num_samples x 1
-                                    bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1) / 4 ; // Approx bytes: (num_samples * 1 snp) / 4 bytes per genotype (packed)
-                                    Ok(array_samples_x_snp.column(0).to_owned()) // Convert N_qc_samples x 1 to Array1<i8>
-                                },
-                                Err(e) => {
-                                    warn!("IoActor [{}]: Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", actor_id, original_m_idx, e);
-                                    Err(format!("Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", original_m_idx, e))
-                                }
-                            };
+                                // Call the .read() method and store its result in a variable.
+                                let read_result = read_options_builder.read(&mut bed_reader_instance);
+                                // Now, match on the explicit result.
+                                let raw_genotypes_i8_result = match read_result {
+                                
+                                    Ok(array_samples_x_snp) => { // Expected shape: num_samples x 1
+                                        bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1) / 4 ; // Approx bytes: (num_samples * 1 snp) / 4 bytes per genotype (packed)
+                                        Ok(array_samples_x_snp.column(0).to_owned()) // Convert N_qc_samples x 1 to Array1<i8>
+                                    },
+                                    Err(e) => {
+                                        warn!("IoActor [{}]: Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", actor_id, original_m_idx, e);
+                                        Err(format!("Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", original_m_idx, e))
+                                    }
+                                };
                             if response_tx.send(IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }).is_err() {
                                 debug!("IoActor [{}]: Failed to send RawSnpDataForQc response for SNP original_idx {}. Receiver likely dropped.", actor_id, original_m_idx);
                             }
