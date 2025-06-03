@@ -298,24 +298,24 @@ pub mod matrix_ops {
 
     pub fn aggregate_chromosome_data(
         per_chromosome_data: Vec<Vec<VariantGenotypeData>>,
-    ) -> (Vec<String>, Vec<String>, Vec<u64>, Vec<Vec<u8>>) {
+    ) -> (Vec<String>, Vec<Vec<u8>>) { // Changed return type
         let mut all_variant_ids = Vec::new();
-        let mut all_chromosomes = Vec::new();
-        let mut all_positions = Vec::new();
+        // Removed: let mut all_chromosomes = Vec::new();
+        // Removed: let mut all_positions = Vec::new();
         let mut all_numerical_genotypes_variant_major = Vec::new();
 
         for chrom_data_vec in per_chromosome_data {
             for variant_data in chrom_data_vec {
                 all_variant_ids.push(variant_data.id);
-                all_chromosomes.push(variant_data.chromosome);
-                all_positions.push(variant_data.position);
+                // Removed: all_chromosomes.push(variant_data.chromosome);
+                // Removed: all_positions.push(variant_data.position);
                 all_numerical_genotypes_variant_major.push(variant_data.numerical_genotypes);
             }
         }
         (
             all_variant_ids,
-            all_chromosomes,
-            all_positions,
+            // Removed: all_chromosomes,
+            // Removed: all_positions,
             all_numerical_genotypes_variant_major,
         )
     }
