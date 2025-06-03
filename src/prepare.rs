@@ -1,6 +1,5 @@
 use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::error::Error;
 use log::{info, debug, warn, error};
@@ -103,7 +102,7 @@ mod io_service_infrastructure {
     use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering as AtomicOrdering};
     use std::collections::HashMap;
-    use flume;
+    use flume::{self, select}; // Added select here
     use ndarray::{Array1, Array2};
     // Assuming Bed and ReadOptions are used by actors; adjust if only path is needed by actors.
     // use crate::bed_reader::{Bed, ReadOptions}; 
@@ -132,6 +131,7 @@ mod io_service_infrastructure {
 
     // Ensure responses are Send + Sync if passed across threads, which flume requires.
     // ndarray Arrays are Send/Sync if their elements are. String is. Result is if Ok/Err are.
+    #[derive(Debug)] // Added Debug derive
     pub(crate) enum IoResponse {
         RawSnpDataForQc { // For single SNP QC
             raw_genotypes_i8_result: Result<Array1<i8>, String>, // N_qc_samples x 1 (column vector)
@@ -641,12 +641,11 @@ mod io_service_infrastructure {
             self.service_shutdown_signal.store(true, AtomicOrdering::SeqCst);
     
             // Shutdown controller thread first
-            if let Some(controller_handle) = self.controller_join_handle.lock().unwrap().take() {
+            if let Some(controller_handle_owned) = self.controller_join_handle.lock().unwrap().take() {
                 info!("IoService: Waiting for controller thread to exit...");
-                if let Err(e) = controller_handle.join_timeout(Duration::from_secs(5)) {
-                    warn!("IoService: Controller thread join timed out or panicked: {:?}", e);
-                } else {
-                    info!("IoService: Controller thread successfully joined.");
+                match controller_handle_owned.join() {
+                    Ok(_) => info!("IoService: Controller thread successfully joined."),
+                    Err(e) => warn!("IoService: Controller thread panicked: {:?}", e),
                 }
             }
     
@@ -662,10 +661,9 @@ mod io_service_infrastructure {
                         warn!("IoService: Failed to send shutdown to actor {}: {}. May have already exited.", actor_id, e);
                     }
                     info!("IoService: Waiting for actor {} to join...", actor_id);
-                    if let Err(e_join) = actor_handle.join_handle.join_timeout(Duration::from_secs(3)) {
-                         warn!("IoService: Actor {} join timed out or panicked: {:?}", actor_id, e_join);
-                    } else {
-                        info!("IoService: Actor {} successfully joined.", actor_id);
+                    match actor_handle.join_handle.join() {
+                        Ok(_) => info!("IoService: Actor {} successfully joined.", actor_id),
+                        Err(e_join) => warn!("IoService: Actor {} panicked: {:?}", actor_id, e_join),
                     }
                 }
             }
@@ -770,21 +768,28 @@ impl MicroarrayDataPreparer {
             self.perform_snp_qc_and_calc_std_params(&original_indices_of_qc_samples_arc, num_qc_samples)?;
         if final_qc_snps_details.is_empty() { return Err(DataPrepError::from("No SNPs passed all QC filters.").into()); }
 
-        let (ld_block_specifications, original_indices_of_pca_snps, 
-               mean_allele_dosages_for_pca_snps, std_devs_allele_dosages_for_pca_snps, num_blocked_snps_for_pca) = 
+        let (ld_block_specifications, 
+               original_indices_of_pca_snps_vec, // Renamed to indicate it's a Vec
+               mean_allele_dosages_for_pca_snps_arr, // Renamed
+               std_devs_allele_dosages_for_pca_snps_arr, // Renamed
+               num_blocked_snps_for_pca) = 
             self.map_snps_to_ld_blocks(&final_qc_snps_details)?;
         if num_blocked_snps_for_pca == 0 { return Err(DataPrepError::from("No SNPs mapped to LD blocks or all resulting blocks were empty.").into()); }
 
-        // MicroarrayGenotypeAccessor::new now returns Self directly.
+        // Wrap data in Arc before passing to accessor
+        let original_indices_of_pca_snps_arc = Arc::new(original_indices_of_pca_snps_vec);
+        let mean_allele_dosages_for_pca_snps_arc = Arc::new(mean_allele_dosages_for_pca_snps_arr);
+        let std_devs_allele_dosages_for_pca_snps_arc = Arc::new(std_devs_allele_dosages_for_pca_snps_arr);
+
+        // MicroarrayGenotypeAccessor::new call corrected
         let accessor = MicroarrayGenotypeAccessor::new(
-            self.config.bed_file_path.clone(),
-            original_indices_of_qc_samples_arc, // Pass the Arc'd version
-            Arc::new(original_indices_of_pca_snps),   
-            Arc::new(mean_allele_dosages_for_pca_snps), 
-            Arc::new(std_devs_allele_dosages_for_pca_snps), 
-            num_qc_samples,
-            num_blocked_snps_for_pca,
-            self.io_service.request_tx.clone(), // Pass the IoService request sender
+            self.io_service.request_tx.clone(),         // 1. io_request_tx
+            original_indices_of_qc_samples_arc.clone(), // 2. original_indices_of_qc_samples (already Arc'd)
+            original_indices_of_pca_snps_arc,           // 3. original_indices_of_pca_snps
+            mean_allele_dosages_for_pca_snps_arc,       // 4. mean_allele1_dosages_for_pca_snps
+            std_devs_allele_dosages_for_pca_snps_arc,   // 5. std_devs_allele1_dosages_for_pca_snps
+            num_qc_samples,                             // 6. num_total_qc_samples
+            num_blocked_snps_for_pca                    // 7. num_total_pca_snps
         );
         info!("Data preparation pipeline complete. Ready for EigenSNP. N_samples_qc={}, D_snps_blocked_for_pca={}", num_qc_samples, num_blocked_snps_for_pca);
         Ok((accessor, ld_block_specifications, num_qc_samples, num_blocked_snps_for_pca))
@@ -1369,7 +1374,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
 
         match self.io_request_tx.send_timeout(request, ACCESSOR_IO_TIMEOUT) {
             Ok(_) => { /* Request sent successfully */ }
-            Err(flume::SendTimeoutError::Timeout) => {
+            Err(flume::SendTimeoutError::Timeout(_)) => { // Corrected pattern
                 let err_msg = "Timeout sending IoRequest::GetSnpBlockForEigen to IoService".to_string();
                 error!("{}", err_msg);
                 return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
