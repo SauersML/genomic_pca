@@ -575,7 +575,6 @@ mod io_service_infrastructure {
                     }
                 }
                 SelectOutcome::Timeout => {
-                    // This case corresponds to the original `default` arm of the select! block.
                     // It's executed if neither channel had a message within the 200ms timeout.
                     if global_shutdown_signal.load(AtomicOrdering::Relaxed) {
                         info!("IoActor [{}]: Global shutdown signal detected during default check. Exiting.", actor_id);
