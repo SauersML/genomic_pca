@@ -10,8 +10,8 @@ use clap::Parser;
 use env_logger;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
-use ndarray::{Array1, Array2, s as ndarray_s}; // Aliased 's'
-use noodles_vcf::{self as noodles_vcf_crate, Header as VcfHeader}; // Aliased noodles_vcf
+use ndarray::Array2; // Aliased 's'
+use noodles_vcf::{self as noodles_vcf_crate}; // Aliased noodles_vcf
 use num_cpus;
 use rayon::prelude::*;
 use std::{
@@ -55,9 +55,7 @@ use efficient_pca::PCA as EfficientPcaModel; // For the VCF workflow
 
 // For EigenSNP-Rust Core Algorithm & Interface Types from external crate
 use efficient_pca::eigensnp::{
-    EigenSNPCoreAlgorithm, EigenSNPCoreAlgorithmConfig, EigenSNPCoreOutput,
-    LdBlockSpecification,       // Used by MicroarrayDataPreparer and EigenSNPCoreAlgorithm
-    PcaReadyGenotypeAccessor,   // Trait implemented by MicroarrayGenotypeAccessor in src/prepare.rs
+    EigenSNPCoreAlgorithm, EigenSNPCoreAlgorithmConfig,   // Trait implemented by MicroarrayGenotypeAccessor in src/prepare.rs
     // PcaSnpId, QcSampleId,    // These are used by types above and in src/prepare.rs
     // ThreadSafeStdError,      // Used in PcaReadyGenotypeAccessor definition in src/prepare.rs
 };
@@ -620,7 +618,7 @@ mod pca_runner { // For VCF workflow
 mod output_writer {
     use super::{anyhow, info, warn, Result, Array2, File, BufWriter, Write};
     // Array1 might be needed if directly writing from ndarray::Array1
-    use ndarray::Array1; 
+     
 
     // Helper to create output files.
     fn create_output_file(prefix: &str, suffix: &str) -> Result<BufWriter<File>> {
