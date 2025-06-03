@@ -527,12 +527,15 @@ mod io_service_infrastructure {
                     match request {
                         IoRequest::GetSnpDataForQc { original_m_idx, qc_sample_indices, response_tx } => {
                             // bed_reader ReadOptions for a single SNP column for specific samples
-                            let read_options = ReadOptions::builder()
+                            // Bind the slice to a variable to ensure its lifetime extends sufficiently.
+                            let qc_sample_indices_slice: &[isize] = qc_sample_indices.as_slice();
+                            let read_options_builder = ReadOptions::builder()
                                 .sid_index(original_m_idx as isize) // Read one specific SNP by its original BIM index
-                                .iid_index(qc_sample_indices.as_slice()) // Read for specific QC'd samples
+                                .iid_index(qc_sample_indices_slice) // Use the slice with an extended lifetime
                                 .i8().count_a1(); // Read as i8, count allele1
                             
-                            let raw_genotypes_i8_result = match read_options.read(&mut bed_reader_instance) {
+                            // The read_options_builder is consumed by the .read() method.
+                            let raw_genotypes_i8_result = match read_options_builder.read(&mut bed_reader_instance) {
                                 Ok(array_samples_x_snp) => { // Expected shape: num_samples x 1
                                     bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1) / 4 ; // Approx bytes: (num_samples * 1 snp) / 4 bytes per genotype (packed)
                                     Ok(array_samples_x_snp.column(0).to_owned()) // Convert N_qc_samples x 1 to Array1<i8>
@@ -548,12 +551,16 @@ mod io_service_infrastructure {
                         },
                         IoRequest::GetSnpBlockForEigen { original_m_indices_for_bed, original_sample_indices_for_bed, response_tx } => {
                             // bed_reader ReadOptions for a block of SNPs and samples
-                            let read_options = ReadOptions::builder()
-                                .sid_index(original_m_indices_for_bed.as_slice()) // SNPs by original BIM indices
-                                .iid_index(original_sample_indices_for_bed.as_slice()) // Samples by original FAM indices
+                            // Bind slices to variables to ensure their lifetimes extend sufficiently.
+                            let original_m_indices_slice: &[isize] = original_m_indices_for_bed.as_slice();
+                            let original_sample_indices_slice: &[isize] = original_sample_indices_for_bed.as_slice();
+                            let read_options_builder = ReadOptions::builder()
+                                .sid_index(original_m_indices_slice) // Use the slice with an extended lifetime
+                                .iid_index(original_sample_indices_slice) // Use the slice with an extended lifetime
                                 .i8().count_a1();
                             
-                            let raw_i8_block_result = match read_options.read(&mut bed_reader_instance) {
+                            // The read_options_builder is consumed by the .read() method.
+                            let raw_i8_block_result = match read_options_builder.read(&mut bed_reader_instance) {
                                 Ok(array_samples_x_snps) => { // Expected shape: num_samples x num_snps
                                     // Approximate bytes read: (num_samples * num_snps) / 4 bytes per genotype
                                     bytes_read_for_task = (array_samples_x_snps.len_of(ndarray::Axis(0)) * array_samples_x_snps.len_of(ndarray::Axis(1))) / 4;
