@@ -27,13 +27,13 @@ anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
 efficient_pca = { git = "https://github.com/SauersML/efficient_pca.git", branch = "main", features = ["enable-eigensnp-diagnostics"] }
 env_logger = "0.11.8"
-flume = "0.10" # Added
+flume = "0.11.1"
 indicatif = "0.17.11"
-libc = "0.2" # Added
+libc = "0.2.172"
 log = "0.4.27"
 ndarray = "0.16.1"
 noodles-vcf = "0.78.0"
-num_cpus = "1.17.0" # Existing version 1.17.0 is compatible with requested 1.16
+num_cpus = "1.17.0"
 rayon = "1.10.0"
 bed-reader = "1.0.6"
 statrs = "0.18.0"
