@@ -1439,8 +1439,8 @@ impl MicroarrayDataPreparer {
             }
 
             let parts: Vec<&str> = trimmed_line.split_whitespace().collect();
-            if parts.len() < 4 {
-                warn!("Skipping malformed LD block line {}: '{}' (expected at least 4 fields: chr start end id)", line_num + 1, line);
+            if parts.len() < 3 { // Expect at least 3 fields for chr, start, end.
+                warn!("Skipping malformed LD block line {}: '{}' (expected at least 3 fields: chr start end)", line_num + 1, line);
                 continue;
             }
             let chr_str_original = parts[0];
@@ -1449,13 +1449,16 @@ impl MicroarrayDataPreparer {
                 .wrap_err_with_context(|| format!("LD block line {}: Error parsing start pos '{}'", line_num + 1, parts[1]))?;
             let end_pos = parts[2].parse::<i32>()
                 .wrap_err_with_context(|| format!("LD block line {}: Error parsing end pos '{}'", line_num + 1, parts[2]))?;
-            let block_id_str = parts[3].to_string();
+
+            // Auto-generate a block ID based on chromosome and coordinates.
+            let block_id_str = format!("{}:{}-{}", chr_str, start_pos, end_pos);
+
             blocks.push((chr_str, start_pos, end_pos, block_id_str));
         }
         if blocks.is_empty() {
-            warn!("No valid LD blocks parsed from file: {}. Make sure format is chr start end block_id (whitespace separated).", self.config.ld_block_file_path);
+            warn!("No valid LD blocks parsed from file: {}. Make sure format is chr start end (whitespace separated). Block IDs are auto-generated.", self.config.ld_block_file_path);
         } else {
-            info!("Successfully parsed {} LD blocks from file.", blocks.len());
+            info!("Successfully parsed {} LD blocks from file. Block IDs were auto-generated.", blocks.len());
         }
         Ok(blocks)
     }
