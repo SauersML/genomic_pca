@@ -24,7 +24,7 @@ def cli():
     p.add_argument('--bed-prefix',  required=True,
                    help='Path prefix of PLINK files (.bed/.bim/.fam)')
     p.add_argument('--out-dir',     default='pca_results',
-                   help='Folder to write pca.tsv & eigenvalues.tsv')
+                   help='Folder to write pca.tsv & py.eigenvalues.tsv')
     p.add_argument('--k-components', type=int, default=10)
 
     # QC thresholds (same names & meanings as Rust code)
@@ -136,7 +136,7 @@ def main() -> None:
         .to_csv(out_dir / "pca.tsv", sep='\t', index=False, float_format="%.6g")
 
     pd.DataFrame({"PC": pc_cols, "Eigenvalue": evals}) \
-        .to_csv(out_dir / "eigenvalues.tsv", sep='\t',
+        .to_csv(out_dir / "py.eigenvalues.tsv", sep='\t',
                 index=False, float_format="%.6g")
 
     # ─── summary ───
@@ -146,7 +146,7 @@ def main() -> None:
         print(f"  PC{i:<2} eigenvalue : {ev:.6g}")
     print(f"\nResults written to directory: {out_dir}\n"
           f"  • pca.tsv          (scores × {k})\n"
-          f"  • eigenvalues.tsv  (λ₁…λ{k})")
+          f"  • py.eigenvalues.tsv  (λ₁…λ{k})")
     log.info(f"Total wall-time: {(time.time()-t0)/60:.1f} min")
 
 if __name__ == '__main__':
