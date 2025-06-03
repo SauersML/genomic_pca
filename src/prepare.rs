@@ -95,7 +95,7 @@ pub struct MicroarrayDataPreparer {
     io_service: Arc<io_service_infrastructure::IoService>, // Added IoService field
 }
 
-// Optional: Encapsulate IoService and related types in a private inner module.
+// Encapsulate IoService and related types in a private inner module.
 // This helps organize the code if IoService components are numerous or complex.
 mod io_service_infrastructure {
     use super::*; // Imports common types like Arc, Mutex, Array1, Array2, etc.
@@ -103,11 +103,7 @@ mod io_service_infrastructure {
     use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering as AtomicOrdering};
     use std::collections::HashMap;
     use flume; // Keep general flume import
-    // Removed: use flume::{self, select}; 
     use ndarray::{Array1, Array2};
-    // Assuming Bed and ReadOptions are used by actors; adjust if only path is needed by actors.
-    // use crate::bed_reader::{Bed, ReadOptions}; 
-    // use crate::custom_errors::DataPrepError; // If actors return this error type.
     use log::{info, warn, error, debug};
     use std::time::{Instant, Duration};
     use std::collections::VecDeque;
@@ -448,6 +444,18 @@ mod io_service_infrastructure {
                 return; // Critical failure, cannot operate.
             }
         };
+    
+        // Enum to represent the different outcomes of a channel select operation.
+        // This helps structure the logic for handling multiplexed channel operations
+        // using the flume::select::Selector builder pattern. Each variant corresponds
+        // to a distinct event that the actor loop needs to handle.
+        #[derive(Debug)]
+        enum SelectOutcome {
+            IndividualShutdown,
+            RequestReceived(IoRequest),
+            RequestChannelDisconnected,
+            Timeout,
+        }
 
         loop {
             // Check global shutdown first, as it's the most definitive signal.
@@ -455,81 +463,125 @@ mod io_service_infrastructure {
                 info!("IoActor [{}]: Global shutdown signal detected. Exiting.", actor_id);
                 break;
             }
-
-            flume::select! { // Qualified macro call
-                recv(individual_shutdown_rx) -> _msg => {
-                    info!("IoActor [{}]: Individual shutdown signal received. Exiting.", actor_id);
-                    break;
-                },
-                recv(request_rx) -> request_result => {
-                    match request_result {
-                        Ok(request) => {
-                            let queue_len_at_pickup = request_rx.len();
-                            let start_time = Instant::now();
-                            let mut bytes_read_for_task: usize = 0; // Approximate
-
-                            match request {
-                                IoRequest::GetSnpDataForQc { original_m_idx, qc_sample_indices, response_tx } => {
-                                    // bed_reader ReadOptions for a single SNP column for specific samples
-                                    let read_options = ReadOptions::builder()
-                                        .sid_index(original_m_idx as isize) // Read one specific SNP by its original BIM index
-                                        .iid_index(qc_sample_indices.as_slice()) // Read for specific QC'd samples
-                                        .i8().count_a1(); // Read as i8, count allele1
-                                    
-                                    let raw_genotypes_i8_result = match read_options.read(&mut bed_reader_instance) {
-                                        Ok(array_samples_x_snp) => { // Expected shape: num_samples x 1
-                                            bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1) / 4 ; // Approx bytes: (num_samples * 1 snp) / 4 bytes per genotype (packed)
-                                            Ok(array_samples_x_snp.column(0).to_owned()) // Convert N_qc_samples x 1 to Array1<i8>
-                                        },
-                                        Err(e) => {
-                                            warn!("IoActor [{}]: Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", actor_id, original_m_idx, e);
-                                            Err(format!("Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", original_m_idx, e))
-                                        }
-                                    };
-                                    if response_tx.send(IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }).is_err() {
-                                        debug!("IoActor [{}]: Failed to send RawSnpDataForQc response for SNP original_idx {}. Receiver likely dropped.", actor_id, original_m_idx);
-                                    }
-                                },
-                                IoRequest::GetSnpBlockForEigen { original_m_indices_for_bed, original_sample_indices_for_bed, response_tx } => {
-                                    // bed_reader ReadOptions for a block of SNPs and samples
-                                    let read_options = ReadOptions::builder()
-                                        .sid_index(original_m_indices_for_bed.as_slice()) // SNPs by original BIM indices
-                                        .iid_index(original_sample_indices_for_bed.as_slice()) // Samples by original FAM indices
-                                        .i8().count_a1();
-                                    
-                                    let raw_i8_block_result = match read_options.read(&mut bed_reader_instance) {
-                                        Ok(array_samples_x_snps) => { // Expected shape: num_samples x num_snps
-                                            // Approximate bytes read: (num_samples * num_snps) / 4 bytes per genotype
-                                            bytes_read_for_task = (array_samples_x_snps.len_of(ndarray::Axis(0)) * array_samples_x_snps.len_of(ndarray::Axis(1))) / 4;
-                                            Ok(array_samples_x_snps.t().as_standard_layout().to_owned()) // Transpose to SNPs x Samples
-                                        },
-                                        Err(e) => {
-                                            warn!("IoActor [{}]: Bed read failed for GetSnpBlockForEigen: {:?}", actor_id, e);
-                                            Err(format!("Bed read failed for GetSnpBlockForEigen: {:?}", e))
-                                        }
-                                    };
-                                    if response_tx.send(IoResponse::SnpBlockData { raw_i8_block_result }).is_err() {
-                                        debug!("IoActor [{}]: Failed to send SnpBlockData response. Receiver likely dropped.", actor_id);
-                                    }
-                                },
-                            }
-                            let duration_micros = start_time.elapsed().as_micros() as u64;
-                            if metrics_tx.send(IoTaskMetrics { actor_id, bytes_read: bytes_read_for_task, duration_micros, queue_len_at_pickup }).is_err() {
-                                debug!("IoActor [{}]: Failed to send metrics. Controller might be down.", actor_id);
+            // Select logic using flume::select::Selector
+            let selected_event: SelectOutcome;
+            // Scope for the selector and its operations.
+            // The Selector borrows the channels for the duration of the select operation.
+            {
+                let selector = flume::select::Selector::new()
+                    .recv(&individual_shutdown_rx, |result| {
+                        // This closure is called when individual_shutdown_rx is ready.
+                        // It maps the channel's result to a SelectOutcome.
+                        match result {
+                            Ok(_) => SelectOutcome::IndividualShutdown, // Shutdown message received.
+                            Err(flume::RecvError::Disconnected) => {
+                                // If the shutdown channel itself disconnects, treat it as a shutdown.
+                                debug!("IoActor [{}]: Individual shutdown channel disconnected.", actor_id);
+                                SelectOutcome::IndividualShutdown 
                             }
                         }
-                        Err(flume::RecvError::Disconnected) => {
-                            info!("IoActor [{}]: Request channel disconnected. Assuming shutdown. Exiting.", actor_id);
-                            break;
+                    })
+                    .recv(&request_rx, |result| {
+                        // This closure is called when request_rx is ready.
+                        // It maps the channel's result to a SelectOutcome.
+                        match result {
+                            Ok(request) => SelectOutcome::RequestReceived(request), // Request successfully received.
+                            Err(flume::RecvError::Disconnected) => {
+                                // If the main request channel disconnects, signal this specific outcome.
+                                debug!("IoActor [{}]: Main request channel disconnected.", actor_id);
+                                SelectOutcome::RequestChannelDisconnected
+                            }
                         }
+                    });
+
+                // Wait for one of the registered operations to complete, or for the timeout.
+                match selector.wait_timeout(Duration::from_millis(200)) {
+                    Ok(outcome_from_completed_operation) => {
+                        // An operation (recv from individual_shutdown_rx or request_rx) completed.
+                        selected_event = outcome_from_completed_operation;
                     }
-                },
-                default(Duration::from_millis(200)) => { // Periodically check global shutdown if no messages
+                    Err(flume::select::SelectError::Timeout) => {
+                        // The timeout of 200ms elapsed without any registered recv operation completing.
+                        selected_event = SelectOutcome::Timeout;
+                    }
+                    // SelectError only contains the Timeout variant.
+                }
+            }
+
+            // Process the outcome of the select operation.
+            match selected_event {
+                SelectOutcome::IndividualShutdown => {
+                    info!("IoActor [{}]: Individual shutdown signal received or its channel disconnected. Exiting.", actor_id);
+                    break;
+                }
+                SelectOutcome::RequestChannelDisconnected => {
+                    info!("IoActor [{}]: Request channel disconnected. Assuming shutdown. Exiting.", actor_id);
+                    break;
+                }
+                SelectOutcome::RequestReceived(request) => {
+                    // This block contains the logic for processing a received IoRequest.
+                    let queue_len_at_pickup = request_rx.len(); // Get current length after this item was picked.
+                    let start_time = Instant::now();
+                    let mut bytes_read_for_task: usize = 0; // Approximate
+
+                    match request {
+                        IoRequest::GetSnpDataForQc { original_m_idx, qc_sample_indices, response_tx } => {
+                            // bed_reader ReadOptions for a single SNP column for specific samples
+                            let read_options = ReadOptions::builder()
+                                .sid_index(original_m_idx as isize) // Read one specific SNP by its original BIM index
+                                .iid_index(qc_sample_indices.as_slice()) // Read for specific QC'd samples
+                                .i8().count_a1(); // Read as i8, count allele1
+                            
+                            let raw_genotypes_i8_result = match read_options.read(&mut bed_reader_instance) {
+                                Ok(array_samples_x_snp) => { // Expected shape: num_samples x 1
+                                    bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1) / 4 ; // Approx bytes: (num_samples * 1 snp) / 4 bytes per genotype (packed)
+                                    Ok(array_samples_x_snp.column(0).to_owned()) // Convert N_qc_samples x 1 to Array1<i8>
+                                },
+                                Err(e) => {
+                                    warn!("IoActor [{}]: Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", actor_id, original_m_idx, e);
+                                    Err(format!("Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", original_m_idx, e))
+                                }
+                            };
+                            if response_tx.send(IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }).is_err() {
+                                debug!("IoActor [{}]: Failed to send RawSnpDataForQc response for SNP original_idx {}. Receiver likely dropped.", actor_id, original_m_idx);
+                            }
+                        },
+                        IoRequest::GetSnpBlockForEigen { original_m_indices_for_bed, original_sample_indices_for_bed, response_tx } => {
+                            // bed_reader ReadOptions for a block of SNPs and samples
+                            let read_options = ReadOptions::builder()
+                                .sid_index(original_m_indices_for_bed.as_slice()) // SNPs by original BIM indices
+                                .iid_index(original_sample_indices_for_bed.as_slice()) // Samples by original FAM indices
+                                .i8().count_a1();
+                            
+                            let raw_i8_block_result = match read_options.read(&mut bed_reader_instance) {
+                                Ok(array_samples_x_snps) => { // Expected shape: num_samples x num_snps
+                                    // Approximate bytes read: (num_samples * num_snps) / 4 bytes per genotype
+                                    bytes_read_for_task = (array_samples_x_snps.len_of(ndarray::Axis(0)) * array_samples_x_snps.len_of(ndarray::Axis(1))) / 4;
+                                    Ok(array_samples_x_snps.t().as_standard_layout().to_owned()) // Transpose to SNPs x Samples
+                                },
+                                Err(e) => {
+                                    warn!("IoActor [{}]: Bed read failed for GetSnpBlockForEigen: {:?}", actor_id, e);
+                                    Err(format!("Bed read failed for GetSnpBlockForEigen: {:?}", e))
+                                }
+                            };
+                            if response_tx.send(IoResponse::SnpBlockData { raw_i8_block_result }).is_err() {
+                                debug!("IoActor [{}]: Failed to send SnpBlockData response. Receiver likely dropped.", actor_id);
+                            }
+                        },
+                    }
+                    let duration_micros = start_time.elapsed().as_micros() as u64;
+                    if metrics_tx.send(IoTaskMetrics { actor_id, bytes_read: bytes_read_for_task, duration_micros, queue_len_at_pickup }).is_err() {
+                        debug!("IoActor [{}]: Failed to send metrics. Controller might be down.", actor_id);
+                    }
+                }
+                SelectOutcome::Timeout => {
+                    // This case corresponds to the original `default` arm of the select! block.
+                    // It's executed if neither channel had a message within the 200ms timeout.
                     if global_shutdown_signal.load(AtomicOrdering::Relaxed) {
                         info!("IoActor [{}]: Global shutdown signal detected during default check. Exiting.", actor_id);
                         break;
                     }
-                    // Continue loop if no shutdown signal
+                    // Continue loop if no global shutdown signal detected during timeout.
                 }
             }
         }
