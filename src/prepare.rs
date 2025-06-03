@@ -1,12 +1,10 @@
 use flume;
 use log::{debug, error, info, warn};
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, PoisonError};
 use thiserror::Error;
 
 // bed_reader imports
