@@ -24,7 +24,7 @@ use std::{
 use libc; // Added for getrlimit
 
 // --- Helper Function to Query Soft Resource Limits ---
-fn get_rlimit_soft(resource: libc::c_int) -> Result<usize, std::io::Error> {
+fn get_rlimit_soft(resource: libc::c_uint) -> Result<usize, std::io::Error> {
     let mut rlim = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
