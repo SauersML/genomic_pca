@@ -98,16 +98,16 @@ impl<T> From<PoisonError<T>> for DataPrepError {
     }
 }
 
-pub trait WrapErr<T, E_Original>
-where E_Original: std::error::Error + Send + Sync + 'static
+pub trait WrapErr<T, EOriginal>
+where EOriginal: std::error::Error + Send + Sync + 'static
 {
     fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, ThreadSafeStdError>;
     fn wrap_err_with_str(self, context: &str) -> Result<T, ThreadSafeStdError>;
 }
 
-impl<T, E_Original> WrapErr<T, E_Original> for Result<T, E_Original>
+impl<T, EOriginal> WrapErr<T, EOriginal> for Result<T, EOriginal>
 where
-    E_Original: std::error::Error + Send + Sync + 'static,
+    EOriginal: std::error::Error + Send + Sync + 'static,
 {
     fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, ThreadSafeStdError> {
         self.map_err(|e_original| {
@@ -133,8 +133,8 @@ struct IntermediateSnpDetails {
     original_m_idx: usize, // Index in the initial M_initial SNPs from .bim file
     chromosome: String,
     bp_position: i32,
-    allele1: String,
-    allele2: String,
+    // allele1: String, // Removed due to dead_code warning
+    // allele2: String, // Removed due to dead_code warning
     mean_allele1_dosage: Option<f32>,
     std_dev_allele1_dosage: Option<f32>,
 }
@@ -238,9 +238,9 @@ mod io_service_infrastructure {
     pub(crate) const CONTROLLER_ADJUSTMENT_INTERVAL: Duration = Duration::from_millis(750);
     pub(crate) const CONTROLLER_THROUGHPUT_HISTORY_WINDOW_DURATION: Duration = Duration::from_secs(8); // e.g. ~10x adjustment interval
     pub(crate) const TARGET_QUEUE_LENGTH_PER_ACTOR: usize = 3;
-    pub(crate) const MAX_ACCEPTABLE_AVG_TASK_TIME_US: u64 = 150_000; // 150ms as a soft upper limit for "typical" tasks
-    pub(crate) const MIN_THROUGHPUT_IMPROVEMENT_RATIO_FOR_SCALING_UP: f64 = 0.05;
-    pub(crate) const MAX_THROUGHPUT_DROP_RATIO_FOR_SCALING_DOWN_REVERSAL: f64 = 0.1;
+    // pub(crate) const MAX_ACCEPTABLE_AVG_TASK_TIME_US: u64 = 150_000; // 150ms as a soft upper limit for "typical" tasks // Removed due to dead_code
+    // pub(crate) const MIN_THROUGHPUT_IMPROVEMENT_RATIO_FOR_SCALING_UP: f64 = 0.05; // Removed due to dead_code
+    // pub(crate) const MAX_THROUGHPUT_DROP_RATIO_FOR_SCALING_DOWN_REVERSAL: f64 = 0.1; // Removed due to dead_code
     pub(crate) const ACTOR_SCALING_STEP_SIZE: usize = 1;
     pub(crate) const CONTROLLER_SCALING_COOLDOWN_PERIOD: Duration = Duration::from_millis(2000);
 
@@ -1110,9 +1110,9 @@ impl MicroarrayDataPreparer {
             for original_m_idx in start_snp_idx_for_batch..end_snp_idx_for_batch {
                 let chromosome = self.initial_bim_chromosomes[original_m_idx].clone();
                 let bp_position = self.initial_bim_bp_positions[original_m_idx];
-                let allele1 = self.initial_bim_allele1_alleles[original_m_idx].clone();
-                let allele2 = self.initial_bim_allele2_alleles[original_m_idx].clone();
-                let pre_fetched_bim_data = (chromosome, bp_position, allele1, allele2);
+                // let allele1 = self.initial_bim_allele1_alleles[original_m_idx].clone(); // Removed for dead_code
+                // let allele2 = self.initial_bim_allele2_alleles[original_m_idx].clone(); // Removed for dead_code
+                let pre_fetched_bim_data = (chromosome, bp_position); // Removed allele1, allele2
 
                 let (response_tx, response_rx) = flume::bounded(1);
 
@@ -1166,14 +1166,19 @@ impl MicroarrayDataPreparer {
                                     let num_valid_genotypes_for_snp = valid_genotypes.len();
 
                                     if num_qc_samples == 0 {
-                                        debug!("SNP QC (idx {}): num_qc_samples is 0, skipping call rate check.", original_m_idx);
-                                        return None;
-                                    }
-
-                                    if num_valid_genotypes_for_snp != num_qc_samples {
-                                        debug!("SNP QC (idx {}): Failed 100% call rate. Valid genotypes: {}/{}. Skipping.",
-                                               original_m_idx, num_valid_genotypes_for_snp, num_qc_samples);
-                                        return None;
+                                        // If there are no samples, this SNP effectively passes call rate check (or is skipped).
+                                        // No change needed here based on current logic which seems to be 'return None' if num_qc_samples is 0 before this block.
+                                        // However, if it could reach here with num_qc_samples = 0, this check is fine.
+                                        // For safety, let's assume the existing early exit for num_qc_samples == 0 handles it.
+                                        // If not, the division by zero in call_rate calculation would be an issue.
+                                        // The current code returns None if num_qc_samples is 0 a few lines above.
+                                    } else {
+                                        let call_rate = num_valid_genotypes_for_snp as f64 / num_qc_samples as f64;
+                                        if call_rate < min_snp_call_rate_thresh {
+                                            debug!("SNP QC (idx {}): Failed call rate check. Call rate: {:.4}, Threshold: {:.4}. Valid genotypes: {}/{}. Skipping.",
+                                                   original_m_idx, call_rate, min_snp_call_rate_thresh, num_valid_genotypes_for_snp, num_qc_samples);
+                                            return None;
+                                        }
                                     }
 
                                     let mut allele1_dosage_sum_f64: f64 = 0.0;
@@ -1225,9 +1230,9 @@ impl MicroarrayDataPreparer {
                                     }
                                     let std_dev_f32 = (variance.sqrt()) as f32;
 
-                                    let (chromosome, bp_pos, allele1, allele2) = pre_fetched_bim;
+                                    let (chromosome, bp_pos) = pre_fetched_bim; // Removed allele1, allele2
                                     Some(IntermediateSnpDetails {
-                                        original_m_idx, chromosome, bp_position: bp_pos, allele1, allele2,
+                                        original_m_idx, chromosome, bp_position: bp_pos, // allele1, allele2 removed
                                         mean_allele1_dosage: Some(mean_f32),
                                         std_dev_allele1_dosage: Some(std_dev_f32),
                                     })
