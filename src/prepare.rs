@@ -102,7 +102,8 @@ mod io_service_infrastructure {
     use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering as AtomicOrdering};
     use std::collections::HashMap;
-    use flume::{self, select}; // Added select here
+    use flume; // Keep general flume import
+    // Removed: use flume::{self, select}; 
     use ndarray::{Array1, Array2};
     // Assuming Bed and ReadOptions are used by actors; adjust if only path is needed by actors.
     // use crate::bed_reader::{Bed, ReadOptions}; 
@@ -455,7 +456,7 @@ mod io_service_infrastructure {
                 break;
             }
 
-            select! {
+            flume::select! { // Qualified macro call
                 recv(individual_shutdown_rx) -> _msg => {
                     info!("IoActor [{}]: Individual shutdown signal received. Exiting.", actor_id);
                     break;
@@ -783,13 +784,13 @@ impl MicroarrayDataPreparer {
 
         // MicroarrayGenotypeAccessor::new call corrected
         let accessor = MicroarrayGenotypeAccessor::new(
-            self.io_service.request_tx.clone(),         // 1. io_request_tx
-            original_indices_of_qc_samples_arc.clone(), // 2. original_indices_of_qc_samples (already Arc'd)
-            original_indices_of_pca_snps_arc,           // 3. original_indices_of_pca_snps
-            mean_allele_dosages_for_pca_snps_arc,       // 4. mean_allele1_dosages_for_pca_snps
-            std_devs_allele_dosages_for_pca_snps_arc,   // 5. std_devs_allele1_dosages_for_pca_snps
-            num_qc_samples,                             // 6. num_total_qc_samples
-            num_blocked_snps_for_pca                    // 7. num_total_pca_snps
+            original_indices_of_qc_samples_arc.clone(), // Compiler suggested 1st
+            original_indices_of_pca_snps_arc,           // Compiler suggested 2nd
+            std_devs_allele_dosages_for_pca_snps_arc,   // Compiler suggested 3rd
+            mean_allele_dosages_for_pca_snps_arc,       // Compiler suggested 4th
+            num_blocked_snps_for_pca,                   // Compiler suggested 5th
+            num_qc_samples,                             // Compiler suggested 6th
+            self.io_service.request_tx.clone()         // Compiler suggested 7th
         );
         info!("Data preparation pipeline complete. Ready for EigenSNP. N_samples_qc={}, D_snps_blocked_for_pca={}", num_qc_samples, num_blocked_snps_for_pca);
         Ok((accessor, ld_block_specifications, num_qc_samples, num_blocked_snps_for_pca))
@@ -871,6 +872,9 @@ impl MicroarrayDataPreparer {
                 pending_responses_for_batch.push((original_m_idx, pre_fetched_bim_data, response_rx));
             }
             debug!("Batch {}: Dispatched {} requests to IoService.", batch_idx, pending_responses_for_batch.len());
+
+            // Store length before moving pending_responses_for_batch
+            let num_pending_responses_in_batch_for_debug = pending_responses_for_batch.len();
 
             // --- Process Responses for Batch (Parallel using Rayon) ---
             // Clone necessary config values for use in the Rayon closure.
@@ -967,7 +971,7 @@ impl MicroarrayDataPreparer {
                 })
                 .collect();
             
-            debug!("Batch {}: Processed {} responses, got {} QC-passing SNPs.", batch_idx, pending_responses_for_batch.len(), batch_qc_results.len());
+            debug!("Batch {}: Processed {} responses, got {} QC-passing SNPs.", batch_idx, num_pending_responses_in_batch_for_debug, batch_qc_results.len());
             all_final_qc_snps_details.extend(batch_qc_results);
             info!("SNP QC Progress: After batch {}/{}, total QC'd SNPs found: {}", batch_idx + 1, num_batches, all_final_qc_snps_details.len());
         }
