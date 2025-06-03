@@ -1,32 +1,23 @@
 // vcf.rs
 
 // --- External Crate Imports ---
-use anyhow::{anyhow, Error, Result};
-use clap::Parser;
-use efficient_pca::PCA as EfficientPcaModel;
-use env_logger;
-use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, error, info, warn};
+use anyhow::{anyhow, Result};
+use log::{debug, warn};
 use ndarray::{Array2};
 use noodles_vcf::{Record as VcfRecord, Header as VcfHeader}; // Changed
-use num_cpus;
-use rayon::prelude::*;
 use std::{
-    fs::{self, File},
-    io::{BufWriter, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
-    time::Instant,
 };
 
 
 pub mod vcf_processing {
     use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, VcfRecord}; // Added VcfRecord, ensured cli is not present
     // Removed local noodles_vcf import block that was here
-    use noodles_vcf::record::{AlternateBases, Samples};
-    use noodles_vcf::record::samples::{Keys as NoodlesKeys, Series as VcfSeries};
+    
+    
     use noodles_vcf::variant::record::samples::series::Value as GenotypeValue;
-    use noodles_vcf::record::samples; // Explicitly import for `samples::` paths if needed
+     // Explicitly import for `samples::` paths if needed
     use noodles_vcf::variant::record::AlternateBases as _; // Use _ to import trait methods
     use noodles_vcf::variant::record::samples::Series as SeriesTrait; // For explicit trait method calls
 
