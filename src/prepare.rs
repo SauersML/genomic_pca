@@ -529,13 +529,13 @@ mod io_service_infrastructure {
                             // bed_reader ReadOptions for a single SNP column for specific samples
                             // Bind the slice to a variable to ensure its lifetime extends sufficiently.
                             let qc_sample_indices_slice: &[isize] = qc_sample_indices.as_slice();
-                            let read_options_builder = ReadOptions::builder()
+                            let read_result = ReadOptions::builder()
                                 .sid_index(original_m_idx as isize) // Read one specific SNP by its original BIM index
                                 .iid_index(qc_sample_indices_slice) // Use the slice with an extended lifetime
-                                .i8().count_a1(); // Read as i8, count allele1
-                            
-                                // Call the .read() method and store its result in a variable.
-                                let read_result = read_options_builder.read(&mut bed_reader_instance);
+                                .i8()
+                                .count_a1() // Read as i8, count allele1
+                                .read(&mut bed_reader_instance); // The builder lives for the entire expression ensuring valid borrows.
+
                                 // Now, match on the explicit result.
                                 let raw_genotypes_i8_result = match read_result {
                                 
@@ -557,13 +557,13 @@ mod io_service_infrastructure {
                             // Bind slices to variables to ensure their lifetimes extend sufficiently.
                             let original_m_indices_slice: &[isize] = original_m_indices_for_bed.as_slice();
                             let original_sample_indices_slice: &[isize] = original_sample_indices_for_bed.as_slice();
-                            let read_options_builder = ReadOptions::builder()
+                            let read_result = ReadOptions::builder()
                                 .sid_index(original_m_indices_slice) // Use the slice with an extended lifetime
                                 .iid_index(original_sample_indices_slice) // Use the slice with an extended lifetime
-                                .i8().count_a1();
-                            
-                            // Call the .read() method and store its result in a variable.
-                            let read_result = read_options_builder.read(&mut bed_reader_instance);
+                                .i8()
+                                .count_a1()
+                                .read(&mut bed_reader_instance); // The builder lives for the entire expression ensuring valid borrows.
+
                             // Now, match on the explicit result.
                             let raw_i8_block_result = match read_result {
                                 Ok(array_samples_x_snps) => { // Expected shape: num_samples x num_snps
