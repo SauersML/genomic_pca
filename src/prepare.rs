@@ -562,8 +562,10 @@ mod io_service_infrastructure {
                                 .iid_index(original_sample_indices_slice) // Use the slice with an extended lifetime
                                 .i8().count_a1();
                             
-                            // The read_options_builder is consumed by the .read() method.
-                            let raw_i8_block_result = match read_options_builder.read(&mut bed_reader_instance) {
+                            // Call the .read() method and store its result in a variable.
+                            let read_result = read_options_builder.read(&mut bed_reader_instance);
+                            // Now, match on the explicit result.
+                            let raw_i8_block_result = match read_result {
                                 Ok(array_samples_x_snps) => { // Expected shape: num_samples x num_snps
                                     // Approximate bytes read: (num_samples * num_snps) / 4 bytes per genotype
                                     bytes_read_for_task = (array_samples_x_snps.len_of(ndarray::Axis(0)) * array_samples_x_snps.len_of(ndarray::Axis(1))) / 4;
