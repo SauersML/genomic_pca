@@ -4,10 +4,10 @@ use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError}; // Added PoisonError
 use std::time::{Duration, Instant};
+use thiserror::Error; // Added thiserror
 
 // bed_reader imports
 use bed_reader::{Bed, BedErrorPlus, ReadOptions};
@@ -18,48 +18,117 @@ use efficient_pca::eigensnp::{
 };
 
 // --- Custom Error Type for this Module ---
-#[derive(Debug)]
-pub struct DataPrepError(String);
+#[derive(Error, Debug)]
+pub enum DataPrepError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 
-impl std::fmt::Display for DataPrepError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Data Preparation Error: {}", self.0)
+    #[error("BED reader error: {source}")]
+    Bed { #[from] source: Box<BedErrorPlus> },
+
+    #[error("Integer parsing error: {0}")]
+    ParseInt(#[from] std::num::ParseIntError),
+
+    #[error("Float parsing error: {0}")]
+    ParseFloat(#[from] std::num::ParseFloatError),
+
+    #[error("UTF-8 conversion error: {0}")]
+    FromUtf8(#[from] std::string::FromUtf8Error),
+
+    #[error("Flume send error: {0}")]
+    FlumeSend(String),
+
+    #[error("Flume receive error: {0}")]
+    FlumeRecv(String),
+
+    #[error("Flume select error: {0}")]
+    FlumeSelect(String),
+
+    #[error("Mutex poisoned: {0}")]
+    MutexPoisoned(String),
+
+    #[error("Error: {context}")]
+    Contextual {
+        context: String,
+        #[source]
+        source: ThreadSafeStdError, // This is Box<dyn Error + Send + Sync + 'static>
+    },
+
+    #[error("{0}")]
+    Message(String),
+}
+
+// Manual From impl for Flume SendError since it's generic
+impl<T> From<flume::SendError<T>> for DataPrepError {
+    fn from(e: flume::SendError<T>) -> Self {
+        DataPrepError::FlumeSend(format!("Flume send error: {}", e))
     }
 }
 
-impl Error for DataPrepError {}
+// Manual From impl for Flume SendTimeoutError
+impl<T> From<flume::SendTimeoutError<T>> for DataPrepError {
+    fn from(e: flume::SendTimeoutError<T>) -> Self {
+        DataPrepError::FlumeSend(format!("Flume send timeout error: {}", e))
+    }
+}
 
-impl From<String> for DataPrepError {
-    fn from(s: String) -> Self {
-        DataPrepError(s)
+
+// Manual From impl for Flume RecvError
+impl From<flume::RecvError> for DataPrepError {
+    fn from(e: flume::RecvError) -> Self {
+        DataPrepError::FlumeRecv(format!("Flume receive error: {}", e))
     }
 }
-impl From<&str> for DataPrepError {
-    fn from(s: &str) -> Self {
-        DataPrepError(s.to_string())
+
+// Manual From impl for Flume RecvTimeoutError
+impl From<flume::RecvTimeoutError> for DataPrepError {
+    fn from(e: flume::RecvTimeoutError) -> Self {
+        DataPrepError::FlumeRecv(format!("Flume receive timeout error: {}", e))
     }
 }
-// Allow conversion from BedErrorPlus to DataPrepError for convenience
-impl From<Box<BedErrorPlus>> for DataPrepError {
-    fn from(e: Box<BedErrorPlus>) -> Self {
-        DataPrepError(format!("bed_reader error: {}", e))
+
+// Manual From impl for Flume SelectError
+impl From<flume::select::SelectError> for DataPrepError {
+    fn from(e: flume::select::SelectError) -> Self {
+        DataPrepError::FlumeSelect(format!("Flume select error: {}", e))
     }
 }
-impl From<std::io::Error> for DataPrepError {
-    fn from(e: std::io::Error) -> Self {
-        DataPrepError(format!("I/O error: {}", e))
+
+// Manual From impl for Mutex PoisonError
+impl<T> From<PoisonError<T>> for DataPrepError {
+    fn from(e: PoisonError<T>) -> Self {
+        DataPrepError::MutexPoisoned(format!("Mutex poisoned: {}", e))
     }
 }
-impl From<std::num::ParseIntError> for DataPrepError {
-    fn from(e: std::num::ParseIntError) -> Self {
-        DataPrepError(format!("Integer parsing error: {}", e))
+
+
+// --- WrapErr Trait Definition and Implementation ---
+pub trait WrapErr<T, E_Original>
+where E_Original: std::error::Error + Send + Sync + 'static
+{
+    fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, DataPrepError>;
+    fn wrap_err_with_str(self, context: &str) -> Result<T, DataPrepError>;
+}
+
+impl<T, E_Original> WrapErr<T, E_Original> for Result<T, E_Original>
+where
+    E_Original: std::error::Error + Send + Sync + 'static,
+{
+    fn wrap_err_with_context(self, context_fn: impl FnOnce() -> String) -> Result<T, DataPrepError> {
+        self.map_err(|e_original| DataPrepError::Contextual {
+            context: context_fn(),
+            source: Box::new(e_original),
+        })
+    }
+
+    fn wrap_err_with_str(self, context: &str) -> Result<T, DataPrepError> {
+        self.map_err(|e_original| DataPrepError::Contextual {
+            context: context.to_string(),
+            source: Box::new(e_original),
+        })
     }
 }
-impl From<std::num::ParseFloatError> for DataPrepError {
-    fn from(e: std::num::ParseFloatError) -> Self {
-        DataPrepError(format!("Float parsing error: {}", e))
-    }
-}
+
 
 // --- Helper Struct for Intermediate SNP Data ---
 #[derive(Debug, Clone)]
@@ -296,8 +365,8 @@ mod io_service_infrastructure {
                 if successfully_spawned_count < MIN_OPERATIONAL_IO_ACTORS
                     && successfully_spawned_count < initial_target_actors
                 {
-                    service_arc.shutdown_all_actors_and_controller_immediately(); // Attempt cleanup
-                    return Err(DataPrepError(format!("IoService: Failed to spawn enough initial actors (spawned {}, required min {}).", successfully_spawned_count, MIN_OPERATIONAL_IO_ACTORS)));
+                    service_arc.shutdown_all_actors_and_controller_immediately();
+                    return Err(DataPrepError::Message(format!("IoService: Failed to spawn enough initial actors (spawned {}, required min {}).", successfully_spawned_count, MIN_OPERATIONAL_IO_ACTORS)));
                 }
             }
 
@@ -309,15 +378,16 @@ mod io_service_infrastructure {
                         error_msg,
                     }) => {
                         if !success {
+                            let err_message = error_msg.unwrap_or_default();
                             error!(
                                 "IoService: Initial actor {} failed to initialize: {:?}",
                                 actor_id,
-                                error_msg.unwrap_or_default()
+                                err_message
                             );
                             service_arc.shutdown_all_actors_and_controller_immediately();
-                            return Err(DataPrepError(format!(
-                                "IoService: Actor {} failed to initialize.",
-                                actor_id
+                            return Err(DataPrepError::Message(format!(
+                                "IoService: Actor {} failed to initialize. Cause: {}",
+                                actor_id, err_message
                             )));
                         }
                         info!(
@@ -326,17 +396,16 @@ mod io_service_infrastructure {
                         );
                     }
                     Ok(_) => {
-                        // Should not happen with current IoResponse types from init
                         error!("IoService: Received unexpected message type on init channel from actor during startup sequence. Actor index {}.", i);
                         service_arc.shutdown_all_actors_and_controller_immediately();
-                        return Err(DataPrepError(
-                            "IoService: Unexpected message during actor init.".into(),
+                        return Err(DataPrepError::Message(
+                            "IoService: Unexpected message during actor init.".to_string(),
                         ));
                     }
-                    Err(e) => {
+                    Err(e) => { // flume::RecvTimeoutError
                         error!("IoService: Timed out waiting for initial actor {} to report status: {}", i, e);
                         service_arc.shutdown_all_actors_and_controller_immediately();
-                        return Err(DataPrepError(format!(
+                        return Err(DataPrepError::from(e).wrap_err_with_context(||format!(
                             "IoService: Timeout waiting for actor {} init.",
                             i
                         )));
@@ -356,21 +425,13 @@ mod io_service_infrastructure {
                 .spawn(move || io_service_controller_thread(controller_service_arc_clone))
             {
                 Ok(handle) => {
-                    *service_arc.controller_join_handle.lock().map_err(|e| {
-                        DataPrepError(format!(
-                            "Mutex poisoned before setting controller handle: {}",
-                            e
-                        ))
-                    })? = Some(handle);
+                    *service_arc.controller_join_handle.lock()? = Some(handle); // Use From<PoisonError> for DataPrepError
                     info!("IoService: Controller thread spawned successfully.");
                 }
-                Err(e) => {
+                Err(e) => { // std::io::Error
                     error!("IoService: Failed to spawn controller thread: {}", e);
-                    service_arc.shutdown_all_actors_and_controller_immediately(); // Cleanup actors
-                    return Err(DataPrepError(format!(
-                        "IoService: Failed to spawn controller thread: {}",
-                        e
-                    )));
+                    service_arc.shutdown_all_actors_and_controller_immediately();
+                    return Err(DataPrepError::from(e).wrap_err_with_str("Failed to spawn controller thread"));
                 }
             }
 
@@ -381,8 +442,15 @@ mod io_service_infrastructure {
         fn spawn_new_actor_internal(
             &self,
             init_status_tx: Option<flume::Sender<IoResponse>>,
-        ) -> bool {
-            let mut active_actors_guard = self.active_actors.lock().unwrap();
+        ) -> bool { // This function's error handling is simple (logs and returns bool)
+            let mut active_actors_guard = self.active_actors.lock().unwrap_or_else(|e| {
+                // Handle poisoned mutex, though in this context it's tricky what to do.
+                // For now, log and proceed as if it's empty or try to recover.
+                // This is a critical error for actor spawning.
+                error!("IoService: Mutex for active_actors poisoned in spawn_new_actor_internal: {}. Attempting to proceed, but state may be inconsistent.", e);
+                e.into_inner() // Get the guard anyway if possible
+            });
+
             if active_actors_guard.len() >= self.absolute_max_actors {
                 warn!(
                     "IoService: Cannot spawn new actor, absolute_max_actors ({}) reached.",
@@ -801,11 +869,14 @@ mod io_service_infrastructure {
                 // Calculate current_avg_throughput_bps from throughput_history
                 let total_bytes_in_window: usize =
                     throughput_history.iter().map(|&(_, bytes)| bytes).sum();
-                let window_duration_actual_secs =
-                    throughput_history.back().map_or(0.0, |(inst, _)| {
-                        inst.duration_since(throughput_history.front().unwrap().0)
-                            .as_secs_f64()
-                    });
+                let window_duration_actual_secs = throughput_history
+                    .back()
+                    .and_then(|(back_inst, _)| {
+                        throughput_history
+                            .front()
+                            .map(|(front_inst, _)| back_inst.duration_since(*front_inst).as_secs_f64())
+                    })
+                    .unwrap_or(0.0);
                 let current_avg_throughput_bps = if window_duration_actual_secs > 0.0 {
                     (total_bytes_in_window as f64 / window_duration_actual_secs) as usize
                 } else {
@@ -904,35 +975,38 @@ mod io_service_infrastructure {
             }
 
             // Shutdown all active actors
-            let mut active_actors_guard = self.active_actors.lock().unwrap();
-            info!(
-                "IoService: Shutting down {} active actors...",
-                active_actors_guard.len()
-            );
-            let actor_ids: Vec<usize> = active_actors_guard.keys().copied().collect();
-
-            for actor_id in actor_ids {
-                if let Some(actor_handle) = active_actors_guard.remove(&actor_id) {
+            match self.active_actors.lock() {
+                Ok(mut active_actors_guard) => {
                     info!(
-                        "IoService: Sending shutdown signal to actor {}...",
-                        actor_id
+                        "IoService: Shutting down {} active actors...",
+                        active_actors_guard.len()
                     );
-                    if let Err(e) = actor_handle.shutdown_tx.send(()) {
-                        warn!("IoService: Failed to send shutdown to actor {}: {}. May have already exited.", actor_id, e);
-                    }
-                    info!("IoService: Waiting for actor {} to join...", actor_id);
-                    match actor_handle.join_handle.join() {
-                        Ok(_) => info!("IoService: Actor {} successfully joined.", actor_id),
-                        Err(e_join) => {
-                            warn!("IoService: Actor {} panicked: {:?}", actor_id, e_join)
+                    let actor_ids: Vec<usize> = active_actors_guard.keys().copied().collect();
+
+                    for actor_id in actor_ids {
+                        if let Some(actor_handle) = active_actors_guard.remove(&actor_id) {
+                            info!("IoService: Sending shutdown signal to actor {}...", actor_id);
+                            if let Err(e) = actor_handle.shutdown_tx.send(()) { // e is flume::SendError
+                                warn!("IoService: Failed to send shutdown to actor {}: {}. May have already exited.", actor_id, e);
+                            }
+                            info!("IoService: Waiting for actor {} to join...", actor_id);
+                            if let Err(e_join) = actor_handle.join_handle.join() {
+                                warn!("IoService: Actor {} panicked: {:?}", actor_id, e_join);
+                            } else {
+                                info!("IoService: Actor {} successfully joined.", actor_id);
+                            }
                         }
                     }
+                    info!(
+                        "IoService: Shutdown sequence complete. Active actors remaining (should be 0): {}",
+                        active_actors_guard.len()
+                    );
+                }
+                Err(poison_error) => { // Mutex poisoned
+                    warn!("IoService: Active actors mutex poisoned during drop. Some actors may not be cleaned up properly: {}.", poison_error);
+                    // Cannot iterate active_actors_guard if poisoned and cannot recover the guard.
                 }
             }
-            info!(
-                "IoService: Shutdown sequence complete. Active actors remaining (should be 0): {}",
-                active_actors_guard.len()
-            );
         }
     }
 } // end mod io_service_infrastructure
@@ -1130,15 +1204,14 @@ impl MicroarrayDataPreparer {
         let std_devs_allele_dosages_for_pca_snps_arc =
             Arc::new(std_devs_allele_dosages_for_pca_snps_arr);
 
-        // MicroarrayGenotypeAccessor::new call corrected
         let accessor = MicroarrayGenotypeAccessor::new(
-            original_indices_of_qc_samples_arc.clone(), // Compiler suggested 1st
-            original_indices_of_pca_snps_arc,           // Compiler suggested 2nd
-            std_devs_allele_dosages_for_pca_snps_arc,   // Compiler suggested 3rd
-            mean_allele_dosages_for_pca_snps_arc,       // Compiler suggested 4th
-            num_blocked_snps_for_pca,                   // Compiler suggested 5th
-            num_qc_samples,                             // Compiler suggested 6th
-            self.io_service.request_tx.clone(),         // Compiler suggested 7th
+            original_indices_of_qc_samples_arc.clone(),
+            original_indices_of_pca_snps_arc,
+            mean_allele_dosages_for_pca_snps_arc, // Mean first, then StdDev
+            std_devs_allele_dosages_for_pca_snps_arc,
+            num_qc_samples, // num_total_qc_samples first
+            num_blocked_snps_for_pca, // then num_total_pca_snps (D_blocked)
+            self.io_service.request_tx.clone(),
         );
         info!("Data preparation pipeline complete. Ready for EigenSNP. N_samples_qc={}, D_snps_blocked_for_pca={}", num_qc_samples, num_blocked_snps_for_pca);
         Ok((
@@ -1395,7 +1468,7 @@ impl MicroarrayDataPreparer {
             Array1<f32>,
             usize,
         ),
-        ThreadSafeStdError,
+        DataPrepError, // Changed to DataPrepError
     > {
         info!(
             "Mapping {} final QC'd SNPs to LD blocks from '{}'...",
@@ -1463,7 +1536,7 @@ impl MicroarrayDataPreparer {
             if let Some(info) = final_qc_snps_map.get(&orig_m_idx_in_d_blocked) {
                 mean_allele_dosages_for_pca_snps_vec.push(info.mean_allele1_dosage.ok_or_else(
                     || {
-                        DataPrepError::from(format!(
+                        DataPrepError::Message(format!(
                             "Mean dosage missing for QC'd SNP original_idx {}",
                             orig_m_idx_in_d_blocked
                         ))
@@ -1471,14 +1544,15 @@ impl MicroarrayDataPreparer {
                 )?);
                 std_devs_allele_dosages_for_pca_snps_vec.push(
                     info.std_dev_allele1_dosage.ok_or_else(|| {
-                        DataPrepError::from(format!(
+                        DataPrepError::Message(format!(
                             "StdDev dosage missing for QC'd SNP original_idx {}",
                             orig_m_idx_in_d_blocked
                         ))
                     })?,
                 );
             } else {
-                return Err(DataPrepError::from(format!("Internal error: SNP with original index {} from D_blocked set not found in final_qc_snps_map during mu/sigma finalization.", orig_m_idx_in_d_blocked)).into());
+                // This indicates a logic error in the calling code or data preparation steps.
+                return Err(DataPrepError::Message(format!("Internal error: SNP with original index {} from D_blocked set not found in final_qc_snps_map during mu/sigma finalization.", orig_m_idx_in_d_blocked)));
             }
         }
         let mean_allele_dosages_for_pca_snps =
@@ -1525,26 +1599,16 @@ impl MicroarrayDataPreparer {
         ))
     }
 
-    fn parse_ld_block_file(&self) -> Result<Vec<(String, i32, i32, String)>, ThreadSafeStdError> {
+    fn parse_ld_block_file(&self) -> Result<Vec<(String, i32, i32, String)>, DataPrepError> { // Changed to DataPrepError
         use std::fs::File;
         use std::io::{BufRead, BufReader};
         info!("Parsing LD block file: {}", self.config.ld_block_file_path);
-        let file = File::open(&self.config.ld_block_file_path).map_err(|e| {
-            DataPrepError::from(format!(
-                "Failed to open LD block file '{}': {}",
-                self.config.ld_block_file_path, e
-            ))
-        })?;
+        let file = File::open(&self.config.ld_block_file_path)
+            .wrap_err_with_context(|| format!("Failed to open LD block file '{}'", self.config.ld_block_file_path))?;
         let reader = BufReader::new(file);
         let mut blocks = Vec::new();
         for (line_num, line_result) in reader.lines().enumerate() {
-            let line = line_result.map_err(|e| {
-                DataPrepError::from(format!(
-                    "Error reading line {} from LD block file: {}",
-                    line_num + 1,
-                    e
-                ))
-            })?;
+            let line = line_result.wrap_err_with_context(|| format!("Error reading line {} from LD block file", line_num + 1))?;
             let trimmed_line = line.trim();
             if trimmed_line.is_empty()
                 || trimmed_line.starts_with('#')
@@ -1561,22 +1625,10 @@ impl MicroarrayDataPreparer {
             }
             let chr_str_original = parts[0];
             let chr_str = Self::normalize_chromosome_name(chr_str_original);
-            let start_pos = parts[1].parse::<i32>().map_err(|e| {
-                DataPrepError::from(format!(
-                    "LD block line {}: Error parsing start pos '{}': {}",
-                    line_num + 1,
-                    parts[1],
-                    e
-                ))
-            })?;
-            let end_pos = parts[2].parse::<i32>().map_err(|e| {
-                DataPrepError::from(format!(
-                    "LD block line {}: Error parsing end pos '{}': {}",
-                    line_num + 1,
-                    parts[2],
-                    e
-                ))
-            })?;
+            let start_pos = parts[1].parse::<i32>()
+                .wrap_err_with_context(|| format!("LD block line {}: Error parsing start pos '{}'", line_num + 1, parts[1]))?;
+            let end_pos = parts[2].parse::<i32>()
+                .wrap_err_with_context(|| format!("LD block line {}: Error parsing end pos '{}'", line_num + 1, parts[2]))?;
             let block_id_str = parts[3].to_string();
             blocks.push((chr_str, start_pos, end_pos, block_id_str));
         }
@@ -1773,25 +1825,21 @@ impl MicroarrayDataPreparer {
 
 // --- Genotype Accessor Implementation ---
 /// Accessor for genotype data from a BED file, designed to be used by EigenSNP.
-/// It opens the BED file on each call to `get_standardized_snp_sample_block`
-/// to make sure we have thread safety given the Bed reader's internal structure.
+/// It uses an IoService to request data from the BED file.
 #[derive(Clone)]
 pub struct MicroarrayGenotypeAccessor {
-    // bed_file_path: String,
-    io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>,
     original_indices_of_qc_samples: Arc<Vec<isize>>,
     original_indices_of_pca_snps: Arc<Vec<usize>>,
     mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
     std_devs_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
     num_total_qc_samples: usize,
-    num_total_pca_snps: usize, // D_blocked
+    num_total_pca_snps: usize, // D_blocked (number of SNPs after QC and LD blocking)
+    io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>,
 }
 
 impl MicroarrayGenotypeAccessor {
     /// Creates a new MicroarrayGenotypeAccessor.
-    /// Stores the path to the BED file and other necessary metadata.
     pub fn new(
-        // bed_file_path: String, // Removed
         original_indices_of_qc_samples: Arc<Vec<isize>>,
         original_indices_of_pca_snps: Arc<Vec<usize>>,
         mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
@@ -1800,36 +1848,35 @@ impl MicroarrayGenotypeAccessor {
         num_total_pca_snps: usize,
         io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>,
     ) -> Self {
-        // Constructor now returns Self directly
         assert_eq!(
             original_indices_of_qc_samples.len(),
             num_total_qc_samples,
-            "Accessor: Sample count mismatch"
+            "Accessor: Initial QC sample count mismatch with provided 'original_indices_of_qc_samples' vector length."
         );
         assert_eq!(
             original_indices_of_pca_snps.len(),
             num_total_pca_snps,
-            "Accessor: D_blocked SNP original index count mismatch"
+            "Accessor: PCA-ready SNP count (D_blocked) mismatch with provided 'original_indices_of_pca_snps' vector length."
         );
         assert_eq!(
             mean_allele1_dosages_for_pca_snps.len(),
             num_total_pca_snps,
-            "Accessor: Mean dosage vector length mismatch"
+            "Accessor: Mean dosage vector length mismatch with D_blocked SNP count."
         );
         assert_eq!(
             std_devs_allele1_dosages_for_pca_snps.len(),
             num_total_pca_snps,
-            "Accessor: StdDev dosage vector length mismatch"
+            "Accessor: StdDev dosage vector length mismatch with D_blocked SNP count."
         );
 
         Self {
-            io_request_tx,
             original_indices_of_qc_samples,
             original_indices_of_pca_snps,
             mean_allele1_dosages_for_pca_snps,
             std_devs_allele1_dosages_for_pca_snps,
             num_total_qc_samples,
             num_total_pca_snps,
+            io_request_tx,
         }
     }
 
@@ -1853,183 +1900,85 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
     fn get_standardized_snp_sample_block(
         &self,
         pca_snp_ids_to_fetch: &[PcaSnpId], // Indices 0..D_blocked-1
-        qc_sample_ids_to_fetch: &[QcSampleId], // Indices 0..N-1
-    ) -> Result<Array2<f32>, ThreadSafeStdError> {
-        let num_requested_snps = pca_snp_ids_to_fetch.len();
-        let num_requested_samples = qc_sample_ids_to_fetch.len();
+        qc_sample_ids_to_fetch: &[QcSampleId],
+    ) -> Result<Array2<f32>, ThreadSafeStdError> { // Must return ThreadSafeStdError due to trait
+        let result_internal: Result<Array2<f32>, DataPrepError> = (|| { // IIFE to use ? for DataPrepError
+            let num_requested_snps = pca_snp_ids_to_fetch.len();
+            let num_requested_samples = qc_sample_ids_to_fetch.len();
 
-        if num_requested_snps == 0 || num_requested_samples == 0 {
-            return Ok(Array2::zeros((num_requested_snps, num_requested_samples)));
-        }
-
-        let bed_reader_snp_indices: Vec<isize> = pca_snp_ids_to_fetch
-            .iter()
-            .map(|pca_id| self.original_indices_of_pca_snps[pca_id.0] as isize)
-            .collect();
-        let bed_reader_sample_indices: Vec<isize> = qc_sample_ids_to_fetch
-            .iter()
-            .map(|qc_id| self.original_indices_of_qc_samples[qc_id.0])
-            .collect();
-
-        // 1. Remove Old BED Reading Logic: Done by deleting the previous content.
-
-        // 2. Handle Empty Input
-        if num_requested_snps == 0 || num_requested_samples == 0 {
-            // Return an empty Array2<f32> with dimensions (num_requested_snps, num_requested_samples)
-            // This is consistent with behavior if, for example, num_requested_snps = 0, num_requested_samples = 10,
-            // it should return a 0x10 matrix.
-            return Ok(Array2::zeros((num_requested_snps, num_requested_samples)));
-        }
-
-        // 3. Translate IDs
-        let original_m_indices_for_bed: Vec<isize> = pca_snp_ids_to_fetch
-            .iter()
-            .map(|pca_id| self.original_indices_of_pca_snps[pca_id.0] as isize)
-            .collect();
-
-        let requested_original_sample_indices_for_bed: Vec<isize> = qc_sample_ids_to_fetch
-            .iter()
-            .map(|qc_id| self.original_indices_of_qc_samples[qc_id.0])
-            .collect();
-
-        // 4. Send Request to IoService
-        let (response_tx, response_rx) = flume::bounded(1);
-        let request = io_service_infrastructure::IoRequest::GetSnpBlockForEigen {
-            original_m_indices_for_bed, // These are original BIM indices
-            original_sample_indices_for_bed: Arc::new(requested_original_sample_indices_for_bed), // Arc for potential sharing
-            response_tx,
-        };
-
-        // Re-use timeout from SNP QC, or define a specific one for accessor if different characteristics.
-        // For now, reusing IO_REQUEST_DEFAULT_TIMEOUT from perform_snp_qc_and_calc_std_params's scope.
-        // This constant would ideally be part of io_service_infrastructure or globally available.
-        // For this exercise, let's assume it's accessible or redefine if needed.
-        // For now, let's use a hardcoded value similar to the one in perform_snp_qc_and_calc_std_params
-        const ACCESSOR_IO_TIMEOUT: Duration = Duration::from_secs(60);
-
-        match self
-            .io_request_tx
-            .send_timeout(request, ACCESSOR_IO_TIMEOUT)
-        {
-            Ok(_) => { /* Request sent successfully */ }
-            Err(flume::SendTimeoutError::Timeout(_)) => {
-                // Corrected pattern
-                let err_msg =
-                    "Timeout sending IoRequest::GetSnpBlockForEigen to IoService".to_string();
-                error!("{}", err_msg);
-                return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+            if num_requested_snps == 0 || num_requested_samples == 0 {
+                return Ok(Array2::zeros((num_requested_snps, num_requested_samples)));
             }
-            Err(flume::SendTimeoutError::Disconnected(_)) => {
-                let err_msg =
-                    "IoService request channel disconnected while sending GetSnpBlockForEigen"
-                        .to_string();
-                error!("{}", err_msg);
-                return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
-            }
-        }
 
-        // 5. Receive Raw Data from IoService
-        match response_rx.recv_timeout(ACCESSOR_IO_TIMEOUT) {
-            Ok(io_service_infrastructure::IoResponse::SnpBlockData {
-                raw_i8_block_result,
-            }) => {
-                match raw_i8_block_result {
-                    Ok(raw_dosages_snps_by_samples_i8_array2) => {
-                        // Data received successfully, proceed to standardization.
-                        // Expected orientation: SNPs x Samples
-                        if raw_dosages_snps_by_samples_i8_array2.nrows() != num_requested_snps
-                            || raw_dosages_snps_by_samples_i8_array2.ncols()
-                                != num_requested_samples
-                        {
-                            let err_msg = format!("IoService returned SnpBlockData with unexpected dimensions. Expected: {}x{}, Got: {}x{}",
-                                                  num_requested_snps, num_requested_samples,
-                                                  raw_dosages_snps_by_samples_i8_array2.nrows(), raw_dosages_snps_by_samples_i8_array2.ncols());
-                            error!("{}", err_msg);
-                            return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
-                        }
+            let original_m_indices_for_bed: Vec<isize> = pca_snp_ids_to_fetch
+                .iter()
+                .map(|pca_id| self.original_indices_of_pca_snps[pca_id.0] as isize)
+                .collect();
+            let requested_original_sample_indices_for_bed: Vec<isize> = qc_sample_ids_to_fetch
+                .iter()
+                .map(|qc_id| self.original_indices_of_qc_samples[qc_id.0])
+                .collect();
 
-                        // 6. On-the-Fly Standardization
-                        let mut standardized_block_f32 =
-                            Array2::<f32>::uninit(raw_dosages_snps_by_samples_i8_array2.raw_dim());
+            let (response_tx, response_rx) = flume::bounded(1);
+            let request = io_service_infrastructure::IoRequest::GetSnpBlockForEigen {
+                original_m_indices_for_bed,
+                original_sample_indices_for_bed: Arc::new(requested_original_sample_indices_for_bed),
+                response_tx,
+            };
 
-                        for i_req_snp in 0..num_requested_snps {
-                            let pca_snp_id_val = pca_snp_ids_to_fetch[i_req_snp].0;
-                            let mean_dosage =
-                                self.mean_allele1_dosages_for_pca_snps[pca_snp_id_val];
-                            let std_dev_dosage =
-                                self.std_devs_allele1_dosages_for_pca_snps[pca_snp_id_val];
+            const ACCESSOR_IO_TIMEOUT: Duration = Duration::from_secs(60);
+            self.io_request_tx.send_timeout(request, ACCESSOR_IO_TIMEOUT)?; // Converts flume::SendTimeoutError via From
 
-                            let raw_snp_row = raw_dosages_snps_by_samples_i8_array2.row(i_req_snp);
-                            let mut standardized_snp_row_to_fill =
-                                standardized_block_f32.row_mut(i_req_snp);
+            match response_rx.recv_timeout(ACCESSOR_IO_TIMEOUT)? { // Converts flume::RecvTimeoutError via From
+                io_service_infrastructure::IoResponse::SnpBlockData { raw_i8_block_result } => {
+                    // raw_i8_block_result is Result<Array2<i8>, String>
+                    // The String error comes from the actor if bed_reader fails.
+                    let raw_dosages_snps_by_samples_i8_array2 = raw_i8_block_result
+                        .map_err(DataPrepError::Message)?;
 
-                            if std_dev_dosage.abs() < 1e-9 {
-                                // Near-zero variance
-                                for i_req_sample in 0..num_requested_samples {
-                                    let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
-                                    if raw_dosage_val_i8 == -127i8 {
-                                        let err_msg = format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
-                                                              pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0);
-                                        error!("{}", err_msg);
-                                        return Err(
-                                            Box::new(DataPrepError(err_msg)) as ThreadSafeStdError
-                                        );
-                                    }
-                                    unsafe {
-                                        standardized_snp_row_to_fill
-                                            .uget_mut(i_req_sample)
-                                            .write(0.0f32);
-                                    }
+                    if raw_dosages_snps_by_samples_i8_array2.nrows() != num_requested_snps
+                        || raw_dosages_snps_by_samples_i8_array2.ncols() != num_requested_samples {
+                        return Err(DataPrepError::Message(format!("IoService returned SnpBlockData with unexpected dimensions. Expected: {}x{}, Got: {}x{}",
+                                              num_requested_snps, num_requested_samples,
+                                              raw_dosages_snps_by_samples_i8_array2.nrows(), raw_dosages_snps_by_samples_i8_array2.ncols())));
+                    }
+
+                    let mut standardized_block_f32 = Array2::<f32>::uninit(raw_dosages_snps_by_samples_i8_array2.raw_dim());
+                    for i_req_snp in 0..num_requested_snps {
+                        let pca_snp_id_val = pca_snp_ids_to_fetch[i_req_snp].0;
+                        let mean_dosage = self.mean_allele1_dosages_for_pca_snps[pca_snp_id_val];
+                        let std_dev_dosage = self.std_devs_allele1_dosages_for_pca_snps[pca_snp_id_val];
+                        let raw_snp_row = raw_dosages_snps_by_samples_i8_array2.row(i_req_snp);
+                        let mut standardized_snp_row_to_fill = standardized_block_f32.row_mut(i_req_snp);
+
+                        if std_dev_dosage.abs() < 1e-9 {
+                            for i_req_sample in 0..num_requested_samples {
+                                let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
+                                if raw_dosage_val_i8 == -127i8 {
+                                    return Err(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0)));
                                 }
-                            } else {
-                                for i_req_sample in 0..num_requested_samples {
-                                    let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
-                                    if raw_dosage_val_i8 == -127i8 {
-                                        let err_msg = format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
-                                                              pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0);
-                                        error!("{}", err_msg);
-                                        return Err(
-                                            Box::new(DataPrepError(err_msg)) as ThreadSafeStdError
-                                        );
-                                    }
-                                    let standardized_val =
-                                        (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
-                                    unsafe {
-                                        standardized_snp_row_to_fill
-                                            .uget_mut(i_req_sample)
-                                            .write(standardized_val);
-                                    }
+                                unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(0.0f32); }
+                            }
+                        } else {
+                            for i_req_sample in 0..num_requested_samples {
+                                let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
+                                if raw_dosage_val_i8 == -127i8 {
+                                     return Err(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0)));
                                 }
+                                let standardized_val = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
+                                unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(standardized_val); }
                             }
                         }
-                        Ok(unsafe { standardized_block_f32.assume_init() })
                     }
-                    Err(e_str) => {
-                        let err_msg =
-                            format!("IoService actor failed to read SNP block: {}", e_str);
-                        error!("{}", err_msg);
-                        Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
-                    }
+                    Ok(unsafe { standardized_block_f32.assume_init() })
                 }
+                unexpected_response => Err(DataPrepError::Message(format!("Received unexpected IoResponse type from IoService: {:?}. Expected SnpBlockData.", unexpected_response))),
             }
-            Ok(unexpected_response) => {
-                let err_msg = format!("Received unexpected IoResponse type from IoService: {:?}. Expected SnpBlockData.", unexpected_response);
-                error!("{}", err_msg);
-                Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
-            }
-            Err(flume::RecvTimeoutError::Timeout) => {
-                let err_msg = "Timeout receiving SnpBlockData from IoService".to_string();
-                error!("{}", err_msg);
-                Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
-            }
-            Err(flume::RecvTimeoutError::Disconnected) => {
-                let err_msg =
-                    "IoService response channel disconnected while waiting for SnpBlockData"
-                        .to_string();
-                error!("{}", err_msg);
-                Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
-            }
-        }
+        })();
+
+        result_internal.map_err(|e| Box::new(e) as ThreadSafeStdError)
     }
 
     fn num_pca_snps(&self) -> usize {
