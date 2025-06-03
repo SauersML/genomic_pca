@@ -1,10 +1,15 @@
 use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+// Removed: use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::error::Error;
 use log::{info, debug, warn, error};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
+use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering as AtomicOrdering};
+use std::collections::{HashMap, HashSet, VecDeque};
+use flume;
+use std::time::{Instant, Duration};
+
 
 // bed_reader imports
 use bed_reader::{Bed, ReadOptions, BedErrorPlus};
@@ -88,25 +93,650 @@ pub struct MicroarrayDataPreparer {
     initial_snp_count_from_bim: usize, 
     initial_sample_count_from_fam: usize,
     initial_sample_ids_from_fam: Arc<Array1<String>>,
+    io_service: Arc<io_service_infrastructure::IoService>, // Added IoService field
 }
 
-impl MicroarrayDataPreparer {
-    pub fn try_new(config: MicroarrayDataPreparerConfig) -> Result<Self, ThreadSafeStdError> {
-        info!("Initializing MicroarrayDataPreparer for BED: {}", config.bed_file_path);
-        let mut bed_for_metadata = Bed::new(&config.bed_file_path)
-            .map_err(|e| DataPrepError::from(format!("Failed to open BED file '{}' for metadata: {}", config.bed_file_path, e)))?;
+// Optional: Encapsulate IoService and related types in a private inner module.
+// This helps organize the code if IoService components are numerous or complex.
+mod io_service_infrastructure {
+    use super::*; // Imports common types like Arc, Mutex, Array1, Array2, etc.
+    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering as AtomicOrdering};
+    use std::collections::HashMap;
+    use flume::{self, select}; // Added select here
+    use ndarray::{Array1, Array2};
+    // Assuming Bed and ReadOptions are used by actors; adjust if only path is needed by actors.
+    // use crate::bed_reader::{Bed, ReadOptions}; 
+    // use crate::custom_errors::DataPrepError; // If actors return this error type.
+    use log::{info, warn, error, debug};
+    use std::time::{Instant, Duration};
+    use std::collections::VecDeque;
+
+
+    // --- Core Enums and Structs for IoService ---
+
+    #[derive(Debug)] // Added for easier debugging if requests are logged
+    pub(crate) enum IoRequest {
+        GetSnpDataForQc {
+            original_m_idx: usize,
+            qc_sample_indices: Arc<Vec<isize>>, // Indices into original FAM order
+            response_tx: flume::Sender<IoResponse>,
+        },
+        GetSnpBlockForEigen {
+            original_m_indices_for_bed: Vec<isize>, // Indices into original BIM order
+            original_sample_indices_for_bed: Arc<Vec<isize>>, // Indices into original FAM order
+            response_tx: flume::Sender<IoResponse>,
+        },
+        // Possibly other request types later, e.g., for specific sample subsets, etc.
+    }
+
+    // Ensure responses are Send + Sync if passed across threads, which flume requires.
+    // ndarray Arrays are Send/Sync if their elements are. String is. Result is if Ok/Err are.
+    #[derive(Debug)] // Added Debug derive
+    pub(crate) enum IoResponse {
+        RawSnpDataForQc { // For single SNP QC
+            raw_genotypes_i8_result: Result<Array1<i8>, String>, // N_qc_samples x 1 (column vector)
+        },
+        SnpBlockData { // For blocks of SNPs for Eigenstrat algorithm
+            // SNPs (rows) x Samples (columns) orientation, as per typical BED reader output for multiple SNPs.
+            raw_i8_block_result: Result<Array2<i8>, String>, 
+        },
+        ActorInitStatus { // Sent by each actor upon startup
+            actor_id: usize,
+            success: bool,
+            error_msg: Option<String>,
+        },
+        // Other response types as needed.
+    }
+
+    pub(crate) struct IoTaskMetrics {
+        pub(crate) actor_id: usize,          // ID of the actor that processed the task
+        pub(crate) bytes_read: usize,        // Bytes read from disk for this task
+        pub(crate) duration_micros: u64,     // Time spent by actor processing this task (IO + computation)
+        pub(crate) queue_len_at_pickup: usize, // Request queue length when actor picked up task
+    }
+
+    pub(crate) struct IoActorHandle {
+        pub(crate) join_handle: std::thread::JoinHandle<()>, // To wait for actor thread termination
+        pub(crate) shutdown_tx: flume::Sender<()>,        // To signal individual actor shutdown
+    }
+
+    pub(crate) struct IoService {
+        pub(crate) bed_file_path: Arc<String>, // Shared path to the BED file for all actors
         
-        let initial_bim_allele1_alleles = Arc::new(bed_for_metadata.allele_1()?.to_owned());
-        let initial_bim_allele2_alleles = Arc::new(bed_for_metadata.allele_2()?.to_owned());
-        let initial_bim_sids = Arc::new(bed_for_metadata.sid()?.to_owned()); // Load SNP IDs
-        let initial_bim_chromosomes = Arc::new(bed_for_metadata.chromosome()?.to_owned()); // Chromosome identifiers from BIM
-        let initial_bim_bp_positions = Arc::new(bed_for_metadata.bp_position()?.to_owned()); // Base-pair positions from BIM
-        let initial_snp_count_from_bim = bed_for_metadata.sid_count()?;
-        let initial_sample_count_from_fam = bed_for_metadata.iid_count()?;
-        let initial_sample_ids_from_fam = Arc::new(bed_for_metadata.iid()?.to_owned());
+        // Request Channel: Controller (or preparer) sends, Actors receive.
+        // Multiple producers (controller/preparer for requests) and multiple consumers (actors).
+        pub(crate) request_tx: flume::Sender<IoRequest>,
+        // Actors clone this receiver. Controller might also peek/monitor.
+        pub(crate) request_rx_shared_for_actors_and_controller_monitoring: flume::Receiver<IoRequest>, 
 
-        debug!("Initial metadata loaded: {} samples, {} SNPs.", initial_sample_count_from_fam, initial_snp_count_from_bim);
+        // Metrics Channel: Actors send, Controller receives.
+        // Multiple producers (actors), single consumer (controller).
+        pub(crate) metrics_tx_for_actors_to_controller: flume::Sender<IoTaskMetrics>,
+        // Controller receives on this.
+        pub(crate) metrics_rx_for_controller: flume::Receiver<IoTaskMetrics>,
 
+        // Actor Management
+        pub(crate) active_actors: Arc<Mutex<HashMap<usize /*actor_id*/, IoActorHandle>>>,
+        pub(crate) next_actor_id: Arc<AtomicUsize>, // For assigning unique IDs to new actors
+
+        // Controller-set Target & Absolute Limit for Actors
+        pub(crate) current_target_actors: Arc<AtomicUsize>, // Target number of actors (dynamically adjusted)
+        pub(crate) absolute_max_actors: usize,             // Hard upper limit for actors
+
+        // Service Lifecycle
+        pub(crate) service_shutdown_signal: Arc<AtomicBool>, // Signals all actors and controller to shutdown
+        
+        // Controller Thread Management (Optional: if controller is part of IoService itself)
+        // Mutex needed if IoService is Arc'd and controller_join_handle is set after Arc creation.
+        pub(crate) controller_join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    // --- Controller Tuning Constants ---
+    // These constants influence how the IoService controller adjusts the number of active IO actors.
+    // Justifications are provided based on common heuristics; optimal values may be system-dependent.
+
+    /// Minimum number of IO actors to keep operational, ensuring basic service availability.
+    /// Set to 1 to always have at least one actor ready if service is active.
+    pub(crate) const MIN_OPERATIONAL_IO_ACTORS: usize = 1;
+
+    /// How often the controller evaluates metrics and potentially adjusts the number of IO actors.
+    /// A value of 750ms provides a balance between responsiveness and avoiding overly frequent changes.
+    pub(crate) const CONTROLLER_ADJUSTMENT_INTERVAL: Duration = Duration::from_millis(750);
+    
+    /// Duration over which to average throughput metrics for decision making.
+    /// A longer window (e.g., 5-10 seconds) smooths out short bursts and provides a more stable view of performance.
+    /// This should be multiple times the `CONTROLLER_ADJUSTMENT_INTERVAL`.
+    pub(crate) const CONTROLLER_THROUGHPUT_HISTORY_WINDOW_DURATION: Duration = Duration::from_secs(8); // e.g. ~10x adjustment interval
+
+    /// Target request queue length per active actor. If average queue length exceeds this, consider scaling up.
+    /// A small number (e.g., 2-3) means actors are generally keeping up.
+    pub(crate) const TARGET_QUEUE_LENGTH_PER_ACTOR: usize = 3;
+
+    /// If average task processing time exceeds this, it might indicate actors are IO-bound or tasks are large.
+    /// This is a soft indicator; primary focus is on throughput and queue length.
+    /// Value in microseconds. 50ms = 50_000 us.
+    pub(crate) const MAX_ACCEPTABLE_AVG_TASK_TIME_US: u64 = 150_000; // 150ms as a soft upper limit for "typical" tasks
+
+    /// Minimum improvement ratio in throughput required to justify keeping an added actor.
+    /// E.g., 0.05 means a 5% increase in throughput is needed. Prevents adding actors for marginal gains.
+    pub(crate) const MIN_THROUGHPUT_IMPROVEMENT_RATIO_FOR_SCALING_UP: f64 = 0.05;
+
+    /// If throughput drops by more than this ratio after removing an actor, consider re-adding.
+    /// E.g., 0.1 means if throughput drops by 10% or more, the scale-down might have been too aggressive.
+    pub(crate) const MAX_THROUGHPUT_DROP_RATIO_FOR_SCALING_DOWN_REVERSAL: f64 = 0.1;
+    
+    /// Number of actors to add or remove at once during a scaling adjustment.
+    /// Adjusting by 1 allows for more gradual changes. Larger values speed up scaling but risk overshooting.
+    pub(crate) const ACTOR_SCALING_STEP_SIZE: usize = 1;
+
+    /// Cooldown period after an actor scaling event (add or remove) before another can occur.
+    /// Prevents rapid oscillations. Should be long enough to observe effect of change.
+    /// e.g., 2-3 times the `CONTROLLER_ADJUSTMENT_INTERVAL`.
+    pub(crate) const CONTROLLER_SCALING_COOLDOWN_PERIOD: Duration = Duration::from_millis(2000);
+
+    // --- IoService Implementation ---
+    impl IoService {
+        pub(crate) fn new(
+            bed_file_path: Arc<String>,
+            absolute_max_actors: usize,
+        ) -> Result<Arc<Self>, DataPrepError> {
+            info!("IoService: Initializing with absolute_max_actors: {}", absolute_max_actors);
+
+            let (request_tx, request_rx_shared) = flume::unbounded::<IoRequest>();
+            let (metrics_tx, metrics_rx) = flume::unbounded::<IoTaskMetrics>();
+
+            let initial_target_actors = std::cmp::min(MIN_OPERATIONAL_IO_ACTORS, absolute_max_actors).max(1);
+            info!("IoService: Initial target actors set to {}", initial_target_actors);
+
+            let service_arc = Arc::new(Self {
+                bed_file_path,
+                request_tx,
+                request_rx_shared_for_actors_and_controller_monitoring: request_rx_shared,
+                metrics_tx_for_actors_to_controller: metrics_tx,
+                metrics_rx_for_controller: metrics_rx, // Store the receiver for the controller
+                active_actors: Arc::new(Mutex::new(HashMap::new())),
+                next_actor_id: Arc::new(AtomicUsize::new(0)),
+                current_target_actors: Arc::new(AtomicUsize::new(initial_target_actors)),
+                absolute_max_actors,
+                service_shutdown_signal: Arc::new(AtomicBool::new(false)),
+                controller_join_handle: Mutex::new(None),
+            });
+
+            // Startup Synchronization for Initial Actors
+            let (init_status_tx, init_status_rx) = flume::bounded::<IoResponse>(initial_target_actors);
+            let mut successfully_spawned_count = 0;
+
+            for _i in 0..initial_target_actors {
+                // Pass a clone of init_status_tx to each actor
+                if service_arc.spawn_new_actor_internal(Some(init_status_tx.clone())) {
+                    successfully_spawned_count += 1;
+                } else {
+                    // This case implies absolute_max_actors was hit, or thread spawn failed.
+                    // spawn_new_actor_internal logs the error.
+                    warn!("IoService: Failed to spawn an initial actor. Expected {} but only {} attempted.", initial_target_actors, successfully_spawned_count);
+                    // No need to break, as spawn_new_actor_internal won't exceed absolute_max_actors.
+                    // If thread creation itself fails, that's a more severe OS issue.
+                }
+            }
+            
+            if successfully_spawned_count < initial_target_actors {
+                 warn!("IoService: Not all initial actors ({}) could be spawned. Only {} were launched. This might be due to hitting absolute_max_actors limit early if it's very low.", initial_target_actors, successfully_spawned_count);
+                 // Proceed if at least MIN_OPERATIONAL_IO_ACTORS were spawned, otherwise error out.
+                 if successfully_spawned_count < MIN_OPERATIONAL_IO_ACTORS && successfully_spawned_count < initial_target_actors {
+                     service_arc.shutdown_all_actors_and_controller_immediately(); // Attempt cleanup
+                     return Err(DataPrepError(format!("IoService: Failed to spawn enough initial actors (spawned {}, required min {}).", successfully_spawned_count, MIN_OPERATIONAL_IO_ACTORS)));
+                 }
+            }
+
+            for i in 0..successfully_spawned_count {
+                match init_status_rx.recv_timeout(Duration::from_secs(10)) {
+                    Ok(IoResponse::ActorInitStatus { actor_id, success, error_msg }) => {
+                        if !success {
+                            error!("IoService: Initial actor {} failed to initialize: {:?}", actor_id, error_msg.unwrap_or_default());
+                            service_arc.shutdown_all_actors_and_controller_immediately();
+                            return Err(DataPrepError(format!("IoService: Actor {} failed to initialize.", actor_id)));
+                        }
+                        info!("IoService: Initial actor {} reported successful initialization.", actor_id);
+                    }
+                    Ok(_) => { // Should not happen with current IoResponse types from init
+                         error!("IoService: Received unexpected message type on init channel from actor during startup sequence. Actor index {}.", i);
+                         service_arc.shutdown_all_actors_and_controller_immediately();
+                         return Err(DataPrepError("IoService: Unexpected message during actor init.".into()));
+                    }
+                    Err(e) => {
+                        error!("IoService: Timed out waiting for initial actor {} to report status: {}", i, e);
+                        service_arc.shutdown_all_actors_and_controller_immediately();
+                        return Err(DataPrepError(format!("IoService: Timeout waiting for actor {} init.", i)));
+                    }
+                }
+            }
+            info!("IoService: All {} initial actors successfully initialized.", successfully_spawned_count);
+            
+            // Spawn Controller Thread
+            let controller_service_arc_clone = Arc::clone(&service_arc);
+            let controller_thread_builder = std::thread::Builder::new().name("io_service_controller".into());
+            match controller_thread_builder.spawn(move || io_service_controller_thread(controller_service_arc_clone)) {
+                Ok(handle) => {
+                    *service_arc.controller_join_handle.lock().map_err(|e| DataPrepError(format!("Mutex poisoned before setting controller handle: {}",e)))? = Some(handle);
+                    info!("IoService: Controller thread spawned successfully.");
+                }
+                Err(e) => {
+                    error!("IoService: Failed to spawn controller thread: {}", e);
+                    service_arc.shutdown_all_actors_and_controller_immediately(); // Cleanup actors
+                    return Err(DataPrepError(format!("IoService: Failed to spawn controller thread: {}", e)));
+                }
+            }
+            
+            Ok(service_arc)
+        }
+
+        // Helper to spawn an actor. `init_status_tx` is Some only during initial startup.
+        fn spawn_new_actor_internal(&self, init_status_tx: Option<flume::Sender<IoResponse>>) -> bool {
+            let mut active_actors_guard = self.active_actors.lock().unwrap();
+            if active_actors_guard.len() >= self.absolute_max_actors {
+                warn!("IoService: Cannot spawn new actor, absolute_max_actors ({}) reached.", self.absolute_max_actors);
+                return false;
+            }
+
+            let actor_id = self.next_actor_id.fetch_add(1, AtomicOrdering::SeqCst);
+            let bed_path_clone = Arc::clone(&self.bed_file_path);
+            let request_rx_clone = self.request_rx_shared_for_actors_and_controller_monitoring.clone();
+            let metrics_tx_clone = self.metrics_tx_for_actors_to_controller.clone();
+            let global_shutdown_clone = Arc::clone(&self.service_shutdown_signal);
+            
+            let (individual_shutdown_tx, individual_shutdown_rx) = flume::bounded::<()>(1);
+
+            let thread_builder = std::thread::Builder::new().name(format!("io_actor_{}", actor_id));
+            
+            match thread_builder.spawn(move || {
+                io_reader_actor_loop(
+                    actor_id,
+                    bed_path_clone,
+                    request_rx_clone,
+                    metrics_tx_clone,
+                    individual_shutdown_rx,
+                    global_shutdown_clone,
+                    init_status_tx, // Pass along the init_status_tx, if provided
+                )
+            }) {
+                Ok(join_handle) => {
+                    active_actors_guard.insert(actor_id, IoActorHandle { join_handle, shutdown_tx: individual_shutdown_tx });
+                    info!("IoService: Actor {} spawned successfully. Total active: {}", actor_id, active_actors_guard.len());
+                    true
+                }
+                Err(e) => {
+                    error!("IoService: Failed to spawn actor {}: {}", actor_id, e);
+                    // Decrement next_actor_id if spawn fails? Consider implications if IDs are critical.
+                    // For now, ID just keeps incrementing.
+                    false
+                }
+            }
+        }
+
+        fn shutdown_one_actor(&self) -> bool {
+            let mut active_actors_guard = self.active_actors.lock().unwrap();
+            if active_actors_guard.is_empty() {
+                return false;
+            }
+            
+            // Simple strategy: remove the actor with the largest ID (often the newest).
+            // More sophisticated strategies could be used (e.g., least busy, oldest).
+            if let Some(actor_id_to_remove) = active_actors_guard.keys().max().copied() {
+                if let Some(handle) = active_actors_guard.remove(&actor_id_to_remove) {
+                    info!("IoService: Shutting down actor {}...", actor_id_to_remove);
+                    if let Err(e) = handle.shutdown_tx.send(()) {
+                        warn!("IoService: Failed to send shutdown signal to actor {}: {}. It might have already exited.", actor_id_to_remove, e);
+                    }
+                    // Joining the thread handle is deferred to the Drop impl or a dedicated cleanup method
+                    // to avoid blocking the controller thread.
+                    info!("IoService: Actor {} signaled for shutdown. Remaining active: {}", actor_id_to_remove, active_actors_guard.len());
+                    return true;
+                }
+            }
+            warn!("IoService: shutdown_one_actor failed to select an actor to shutdown, though map was not empty.");
+            false
+        }
+        
+        // Helper for forceful shutdown during new() or critical failure.
+        fn shutdown_all_actors_and_controller_immediately(&self) {
+            self.service_shutdown_signal.store(true, AtomicOrdering::SeqCst);
+            // Controller isn't formally started yet if new() fails early, but signal might be checked if it was.
+            // For actors:
+            let mut active_actors_guard = self.active_actors.lock().unwrap();
+            for (id, handle) in active_actors_guard.drain() {
+                if handle.shutdown_tx.send(()).is_ok() {
+                    info!("IoService: Sent emergency shutdown to actor {}", id);
+                }
+                // Cannot join here as it might deadlock if actor is waiting on something this thread holds.
+                // And this is a quick shutdown, not graceful.
+            }
+        }
+    }
+
+    // Actor Loop Function
+    fn io_reader_actor_loop(
+        actor_id: usize,
+        bed_file_path: Arc<String>,
+        request_rx: flume::Receiver<IoRequest>,
+        metrics_tx: flume::Sender<IoTaskMetrics>,
+        individual_shutdown_rx: flume::Receiver<()>,
+        global_shutdown_signal: Arc<AtomicBool>,
+        init_status_tx: Option<flume::Sender<IoResponse>>, // Used only for initial startup sync
+    ) {
+        info!("IoActor [{}]: Starting...", actor_id);
+
+        let mut bed_reader_instance = match Bed::new(bed_file_path.as_str()) {
+            Ok(reader) => {
+                if let Some(tx) = init_status_tx.as_ref() {
+                    if tx.send(IoResponse::ActorInitStatus { actor_id, success: true, error_msg: None }).is_err() {
+                        // This means the IoService::new waiting logic might have already timed out or failed.
+                        error!("IoActor [{}]: Failed to send successful init status. IoService might have given up.", actor_id);
+                        // Proceeding anyway, as the Bed reader is fine.
+                    }
+                }
+                info!("IoActor [{}]: Bed reader initialized successfully for '{}'.", actor_id, bed_file_path);
+                reader
+            }
+            Err(e) => {
+                error!("IoActor [{}]: Failed to initialize Bed reader for '{}': {:?}", actor_id, bed_file_path, e);
+                if let Some(tx) = init_status_tx {
+                    if tx.send(IoResponse::ActorInitStatus { actor_id, success: false, error_msg: Some(format!("{:?}", e)) }).is_err() {
+                        error!("IoActor [{}]: Failed to send error init status. IoService might have given up or channel closed.", actor_id);
+                    }
+                }
+                return; // Critical failure, cannot operate.
+            }
+        };
+
+        loop {
+            // Check global shutdown first, as it's the most definitive signal.
+            if global_shutdown_signal.load(AtomicOrdering::Relaxed) {
+                info!("IoActor [{}]: Global shutdown signal detected. Exiting.", actor_id);
+                break;
+            }
+
+            select! {
+                recv(individual_shutdown_rx) -> _msg => {
+                    info!("IoActor [{}]: Individual shutdown signal received. Exiting.", actor_id);
+                    break;
+                },
+                recv(request_rx) -> request_result => {
+                    match request_result {
+                        Ok(request) => {
+                            let queue_len_at_pickup = request_rx.len();
+                            let start_time = Instant::now();
+                            let mut bytes_read_for_task: usize = 0; // Approximate
+
+                            match request {
+                                IoRequest::GetSnpDataForQc { original_m_idx, qc_sample_indices, response_tx } => {
+                                    // bed_reader ReadOptions for a single SNP column for specific samples
+                                    let read_options = ReadOptions::builder()
+                                        .sid_index(original_m_idx as isize) // Read one specific SNP by its original BIM index
+                                        .iid_index(qc_sample_indices.as_slice()) // Read for specific QC'd samples
+                                        .i8().count_a1(); // Read as i8, count allele1
+                                    
+                                    let raw_genotypes_i8_result = match read_options.read(&mut bed_reader_instance) {
+                                        Ok(array_samples_x_snp) => { // Expected shape: num_samples x 1
+                                            bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1) / 4 ; // Approx bytes: (num_samples * 1 snp) / 4 bytes per genotype (packed)
+                                            Ok(array_samples_x_snp.column(0).to_owned()) // Convert N_qc_samples x 1 to Array1<i8>
+                                        },
+                                        Err(e) => {
+                                            warn!("IoActor [{}]: Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", actor_id, original_m_idx, e);
+                                            Err(format!("Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", original_m_idx, e))
+                                        }
+                                    };
+                                    if response_tx.send(IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }).is_err() {
+                                        debug!("IoActor [{}]: Failed to send RawSnpDataForQc response for SNP original_idx {}. Receiver likely dropped.", actor_id, original_m_idx);
+                                    }
+                                },
+                                IoRequest::GetSnpBlockForEigen { original_m_indices_for_bed, original_sample_indices_for_bed, response_tx } => {
+                                    // bed_reader ReadOptions for a block of SNPs and samples
+                                    let read_options = ReadOptions::builder()
+                                        .sid_index(original_m_indices_for_bed.as_slice()) // SNPs by original BIM indices
+                                        .iid_index(original_sample_indices_for_bed.as_slice()) // Samples by original FAM indices
+                                        .i8().count_a1();
+                                    
+                                    let raw_i8_block_result = match read_options.read(&mut bed_reader_instance) {
+                                        Ok(array_samples_x_snps) => { // Expected shape: num_samples x num_snps
+                                            // Approximate bytes read: (num_samples * num_snps) / 4 bytes per genotype
+                                            bytes_read_for_task = (array_samples_x_snps.len_of(ndarray::Axis(0)) * array_samples_x_snps.len_of(ndarray::Axis(1))) / 4;
+                                            Ok(array_samples_x_snps.t().as_standard_layout().to_owned()) // Transpose to SNPs x Samples
+                                        },
+                                        Err(e) => {
+                                            warn!("IoActor [{}]: Bed read failed for GetSnpBlockForEigen: {:?}", actor_id, e);
+                                            Err(format!("Bed read failed for GetSnpBlockForEigen: {:?}", e))
+                                        }
+                                    };
+                                    if response_tx.send(IoResponse::SnpBlockData { raw_i8_block_result }).is_err() {
+                                        debug!("IoActor [{}]: Failed to send SnpBlockData response. Receiver likely dropped.", actor_id);
+                                    }
+                                },
+                            }
+                            let duration_micros = start_time.elapsed().as_micros() as u64;
+                            if metrics_tx.send(IoTaskMetrics { actor_id, bytes_read: bytes_read_for_task, duration_micros, queue_len_at_pickup }).is_err() {
+                                debug!("IoActor [{}]: Failed to send metrics. Controller might be down.", actor_id);
+                            }
+                        }
+                        Err(flume::RecvError::Disconnected) => {
+                            info!("IoActor [{}]: Request channel disconnected. Assuming shutdown. Exiting.", actor_id);
+                            break;
+                        }
+                    }
+                },
+                default(Duration::from_millis(200)) => { // Periodically check global shutdown if no messages
+                    if global_shutdown_signal.load(AtomicOrdering::Relaxed) {
+                        info!("IoActor [{}]: Global shutdown signal detected during default check. Exiting.", actor_id);
+                        break;
+                    }
+                    // Continue loop if no shutdown signal
+                }
+            }
+        }
+        info!("IoActor [{}]: Exiting run loop.", actor_id);
+    }
+
+    // Placeholder for Controller Thread (to be implemented in next step or refined)
+    fn io_service_controller_thread(
+        service_arc: Arc<IoService>,
+    ) {
+        info!("IoController: Starting for service with bed file: {}", service_arc.bed_file_path);
+        let mut throughput_history: VecDeque<(Instant, usize)> = VecDeque::with_capacity(100); // Approx 1 entry per 100ms for 10s window
+        let mut bytes_read_since_last_history_update: usize = 0;
+        let mut last_throughput_update_time = Instant::now();
+        let mut last_adjustment_time = Instant::now();
+        let mut last_scaling_event_time = Instant::now();
+
+
+        loop {
+            if service_arc.service_shutdown_signal.load(AtomicOrdering::Relaxed) {
+                info!("IoController: Shutdown signal detected. Exiting.");
+                break;
+            }
+
+            // Process all available metrics
+            while let Ok(metric) = service_arc.metrics_rx_for_controller.try_recv() {
+                bytes_read_since_last_history_update += metric.bytes_read;
+                // Additional metric processing can happen here (e.g., aggregating task times, queue lengths)
+            }
+
+            // Update throughput history periodically
+            if last_throughput_update_time.elapsed() >= Duration::from_millis(100) { // Update history frequently
+                throughput_history.push_back((Instant::now(), bytes_read_since_last_history_update));
+                bytes_read_since_last_history_update = 0;
+                last_throughput_update_time = Instant::now();
+
+                // Trim history to CONTROLLER_THROUGHPUT_HISTORY_WINDOW_DURATION
+                while let Some((timestamp, _)) = throughput_history.front() {
+                    if timestamp.elapsed() > CONTROLLER_THROUGHPUT_HISTORY_WINDOW_DURATION {
+                        throughput_history.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            
+            // Decision logic periodically at CONTROLLER_ADJUSTMENT_INTERVAL
+            if last_adjustment_time.elapsed() >= CONTROLLER_ADJUSTMENT_INTERVAL &&
+               last_scaling_event_time.elapsed() >= CONTROLLER_SCALING_COOLDOWN_PERIOD {
+
+                let current_live_actors = service_arc.active_actors.lock().unwrap().len();
+                let prev_target_actors = service_arc.current_target_actors.load(AtomicOrdering::Relaxed);
+                let current_request_queue_len = service_arc.request_rx_shared_for_actors_and_controller_monitoring.len();
+
+                // Calculate current_avg_throughput_bps from throughput_history
+                let total_bytes_in_window: usize = throughput_history.iter().map(|&(_, bytes)| bytes).sum();
+                let window_duration_actual_secs = throughput_history.back().map_or(0.0, |(inst, _)| inst.duration_since(throughput_history.front().unwrap().0).as_secs_f64());
+                let current_avg_throughput_bps = if window_duration_actual_secs > 0.0 {
+                    (total_bytes_in_window as f64 / window_duration_actual_secs) as usize
+                } else {
+                    0
+                };
+                
+                debug!("IoController: Eval: LiveActors={}, TargetActors={}, QueueLen={}, ThroughputBps={}", 
+                       current_live_actors, prev_target_actors, current_request_queue_len, current_avg_throughput_bps);
+
+                // Simplified Scaling Logic (Placeholder - needs refinement)
+                let mut new_target_actors = prev_target_actors;
+                if current_request_queue_len > TARGET_QUEUE_LENGTH_PER_ACTOR * current_live_actors.max(1) && current_live_actors < service_arc.absolute_max_actors {
+                    new_target_actors = (prev_target_actors + ACTOR_SCALING_STEP_SIZE).min(service_arc.absolute_max_actors);
+                    info!("IoController: Queue length high ({}). Scaling UP to {} actors.", current_request_queue_len, new_target_actors);
+                } else if current_request_queue_len < (TARGET_QUEUE_LENGTH_PER_ACTOR / 2) * current_live_actors.max(1) && current_live_actors > MIN_OPERATIONAL_IO_ACTORS {
+                     // Only scale down if throughput is not suffering significantly, or if we are well above min actors
+                    new_target_actors = prev_target_actors.saturating_sub(ACTOR_SCALING_STEP_SIZE).max(MIN_OPERATIONAL_IO_ACTORS);
+                    info!("IoController: Queue length low ({}). Scaling DOWN to {} actors.", current_request_queue_len, new_target_actors);
+                }
+                // More sophisticated logic would use throughput changes, task times etc.
+
+                if new_target_actors != prev_target_actors {
+                    service_arc.current_target_actors.store(new_target_actors, AtomicOrdering::Relaxed);
+                    info!("IoController: Adjusting target actors from {} to {}.", prev_target_actors, new_target_actors);
+                    last_scaling_event_time = Instant::now(); // Reset cooldown
+                }
+                
+                // Reconcile Actors
+                // It's important to re-fetch current_live_actors if spawning/shutdown takes time and decisions are rapid.
+                // For now, using the value from start of this adjustment cycle.
+                if current_live_actors < new_target_actors {
+                    // Spawn one actor at a time to give system time to adjust.
+                    // spawn_new_actor_internal handles the check against absolute_max_actors.
+                    if service_arc.spawn_new_actor_internal(None) {
+                         info!("IoController: Spawned one new actor to meet target {}. Live: {}", new_target_actors, service_arc.active_actors.lock().unwrap().len());
+                    }
+                } else if current_live_actors > new_target_actors {
+                    if service_arc.shutdown_one_actor() {
+                        info!("IoController: Shutdown one actor to meet target {}. Live: {}", new_target_actors, service_arc.active_actors.lock().unwrap().len());
+                    }
+                }
+                last_adjustment_time = Instant::now();
+            }
+            
+            std::thread::sleep(Duration::from_millis(100)); // Main controller loop sleep
+        }
+        info!("IoController: Exiting run loop.");
+    }
+    
+    impl Drop for IoService {
+        fn drop(&mut self) {
+            info!("IoService: Shutting down (Drop invoked)... Bed file: {}", self.bed_file_path);
+            self.service_shutdown_signal.store(true, AtomicOrdering::SeqCst);
+    
+            // Shutdown controller thread first
+            if let Some(controller_handle_owned) = self.controller_join_handle.lock().unwrap().take() {
+                info!("IoService: Waiting for controller thread to exit...");
+                match controller_handle_owned.join() {
+                    Ok(_) => info!("IoService: Controller thread successfully joined."),
+                    Err(e) => warn!("IoService: Controller thread panicked: {:?}", e),
+                }
+            }
+    
+            // Shutdown all active actors
+            let mut active_actors_guard = self.active_actors.lock().unwrap();
+            info!("IoService: Shutting down {} active actors...", active_actors_guard.len());
+            let actor_ids: Vec<usize> = active_actors_guard.keys().copied().collect();
+            
+            for actor_id in actor_ids {
+                if let Some(actor_handle) = active_actors_guard.remove(&actor_id) {
+                    info!("IoService: Sending shutdown signal to actor {}...", actor_id);
+                    if let Err(e) = actor_handle.shutdown_tx.send(()) {
+                        warn!("IoService: Failed to send shutdown to actor {}: {}. May have already exited.", actor_id, e);
+                    }
+                    info!("IoService: Waiting for actor {} to join...", actor_id);
+                    match actor_handle.join_handle.join() {
+                        Ok(_) => info!("IoService: Actor {} successfully joined.", actor_id),
+                        Err(e_join) => warn!("IoService: Actor {} panicked: {:?}", actor_id, e_join),
+                    }
+                }
+            }
+            info!("IoService: Shutdown sequence complete. Active actors remaining (should be 0): {}", active_actors_guard.len());
+        }
+    }
+
+} // end mod io_service_infrastructure
+
+
+impl MicroarrayDataPreparer {
+    pub fn try_new(
+        config: MicroarrayDataPreparerConfig,
+        absolute_max_io_actors_from_main: usize, // New argument
+    ) -> Result<Self, ThreadSafeStdError> {
+        info!("Initializing MicroarrayDataPreparer for BED: {}", config.bed_file_path);
+
+        // --- Initial Metadata Load ---
+        // This Bed instance is used SOLELY for initial metadata loading.
+        // It MUST be dropped before IoService is created.
+        let initial_bim_sids: Arc<Array1<String>>;
+        let initial_bim_chromosomes: Arc<Array1<String>>;
+        let initial_bim_bp_positions: Arc<Array1<i32>>;
+        let initial_bim_allele1_alleles: Arc<Array1<String>>;
+        let initial_bim_allele2_alleles: Arc<Array1<String>>;
+        let initial_snp_count_from_bim: usize;
+        let initial_sample_count_from_fam: usize;
+        let initial_sample_ids_from_fam: Arc<Array1<String>>;
+
+        { // Scope for bed_for_metadata to ensure it's dropped
+            let mut bed_for_metadata = Bed::new(&config.bed_file_path)
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to open BED file '{}' for initial metadata: {}", config.bed_file_path, e))) as ThreadSafeStdError)?;
+            
+            initial_bim_allele1_alleles = Arc::new(bed_for_metadata.allele_1()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read allele_1 from BIM for initial metadata: {}", e))) as ThreadSafeStdError)?
+                .to_owned());
+            initial_bim_allele2_alleles = Arc::new(bed_for_metadata.allele_2()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read allele_2 from BIM for initial metadata: {}", e))) as ThreadSafeStdError)?
+                .to_owned());
+            initial_bim_sids = Arc::new(bed_for_metadata.sid()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read SIDs from BIM for initial metadata: {}", e))) as ThreadSafeStdError)?
+                .to_owned());
+            initial_bim_chromosomes = Arc::new(bed_for_metadata.chromosome()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read chromosomes from BIM for initial metadata: {}", e))) as ThreadSafeStdError)?
+                .to_owned());
+            initial_bim_bp_positions = Arc::new(bed_for_metadata.bp_position()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read bp_positions from BIM for initial metadata: {}", e))) as ThreadSafeStdError)?
+                .to_owned());
+            initial_snp_count_from_bim = bed_for_metadata.sid_count()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read sid_count for initial metadata: {}", e))) as ThreadSafeStdError)?;
+            initial_sample_count_from_fam = bed_for_metadata.iid_count()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read iid_count for initial metadata: {}", e))) as ThreadSafeStdError)?;
+            initial_sample_ids_from_fam = Arc::new(bed_for_metadata.iid()
+                .map_err(|e| Box::new(DataPrepError::from(format!("Failed to read IIDs from FAM for initial metadata: {}", e))) as ThreadSafeStdError)?
+                .to_owned());
+            
+            debug!("Initial metadata loaded: {} samples, {} SNPs. Bed reader for metadata is now being dropped.", initial_sample_count_from_fam, initial_snp_count_from_bim);
+            // bed_for_metadata is dropped here when it goes out of scope.
+        }
+
+
+        // --- Initialize IoService ---
+        let bed_file_path_arc = Arc::new(config.bed_file_path.clone());
+        let io_service = io_service_infrastructure::IoService::new(
+            bed_file_path_arc, // Pass Arc<String>
+            absolute_max_io_actors_from_main,
+        )
+        .map_err(|e_ios| Box::new(DataPrepError::from(format!("Failed to initialize IoService: {}", e_ios))) as ThreadSafeStdError)?;
+        
+        info!("IoService initialized successfully for MicroarrayDataPreparer.");
+
+        // --- Construct MicroarrayDataPreparer ---
         Ok(Self { 
             config, 
             initial_bim_sids, 
@@ -117,6 +747,7 @@ impl MicroarrayDataPreparer {
             initial_snp_count_from_bim,
             initial_sample_count_from_fam,
             initial_sample_ids_from_fam,
+            io_service, // Store the initialized IoService
         })
     }
 
@@ -128,27 +759,38 @@ impl MicroarrayDataPreparer {
     ), ThreadSafeStdError> {
         info!("Starting full data preparation pipeline...");
 
-        let (original_indices_of_qc_samples, num_qc_samples) = self.perform_sample_qc()?;
+        let (original_indices_of_qc_samples_vec, num_qc_samples) = self.perform_sample_qc()?;
         if num_qc_samples == 0 { return Err(DataPrepError::from("No samples passed QC.").into()); }
+        
+        // Arc this up for perform_snp_qc_and_calc_std_params and MicroarrayGenotypeAccessor
+        let original_indices_of_qc_samples_arc = Arc::new(original_indices_of_qc_samples_vec);
 
         let (final_qc_snps_details, _num_final_qc_snps) = 
-            self.perform_snp_qc_and_calc_std_params(&original_indices_of_qc_samples, num_qc_samples)?;
+            self.perform_snp_qc_and_calc_std_params(&original_indices_of_qc_samples_arc, num_qc_samples)?;
         if final_qc_snps_details.is_empty() { return Err(DataPrepError::from("No SNPs passed all QC filters.").into()); }
 
-        let (ld_block_specifications, original_indices_of_pca_snps, 
-               mean_allele_dosages_for_pca_snps, std_devs_allele_dosages_for_pca_snps, num_blocked_snps_for_pca) = 
+        let (ld_block_specifications, 
+               original_indices_of_pca_snps_vec, // Renamed to indicate it's a Vec
+               mean_allele_dosages_for_pca_snps_arr, // Renamed
+               std_devs_allele_dosages_for_pca_snps_arr, // Renamed
+               num_blocked_snps_for_pca) = 
             self.map_snps_to_ld_blocks(&final_qc_snps_details)?;
         if num_blocked_snps_for_pca == 0 { return Err(DataPrepError::from("No SNPs mapped to LD blocks or all resulting blocks were empty.").into()); }
 
-        // MicroarrayGenotypeAccessor::new now returns Self directly.
+        // Wrap data in Arc before passing to accessor
+        let original_indices_of_pca_snps_arc = Arc::new(original_indices_of_pca_snps_vec);
+        let mean_allele_dosages_for_pca_snps_arc = Arc::new(mean_allele_dosages_for_pca_snps_arr);
+        let std_devs_allele_dosages_for_pca_snps_arc = Arc::new(std_devs_allele_dosages_for_pca_snps_arr);
+
+        // MicroarrayGenotypeAccessor::new call corrected
         let accessor = MicroarrayGenotypeAccessor::new(
-            self.config.bed_file_path.clone(),
-            Arc::new(original_indices_of_qc_samples),
-            Arc::new(original_indices_of_pca_snps),   
-            Arc::new(mean_allele_dosages_for_pca_snps), 
-            Arc::new(std_devs_allele_dosages_for_pca_snps), 
-            num_qc_samples,
-            num_blocked_snps_for_pca,
+            self.io_service.request_tx.clone(),         // 1. io_request_tx
+            original_indices_of_qc_samples_arc.clone(), // 2. original_indices_of_qc_samples (already Arc'd)
+            original_indices_of_pca_snps_arc,           // 3. original_indices_of_pca_snps
+            mean_allele_dosages_for_pca_snps_arc,       // 4. mean_allele1_dosages_for_pca_snps
+            std_devs_allele_dosages_for_pca_snps_arc,   // 5. std_devs_allele1_dosages_for_pca_snps
+            num_qc_samples,                             // 6. num_total_qc_samples
+            num_blocked_snps_for_pca                    // 7. num_total_pca_snps
         );
         info!("Data preparation pipeline complete. Ready for EigenSNP. N_samples_qc={}, D_snps_blocked_for_pca={}", num_qc_samples, num_blocked_snps_for_pca);
         Ok((accessor, ld_block_specifications, num_qc_samples, num_blocked_snps_for_pca))
@@ -172,151 +814,168 @@ impl MicroarrayDataPreparer {
         Ok((qc_sample_original_indices, num_qc_samples))
     }
 
-    /// Performs SNP quality control (call rate, MAF, HWE) and calculates standardization parameters (mean, std dev).
-    /// This version initializes one `Bed` reader instance per Rayon worker thread for efficiency.
+    /// Performs SNP quality control (call rate, MAF, HWE) and calculates standardization parameters (mean, std dev)
+    /// using the IoService for batched BED file reading.
     fn perform_snp_qc_and_calc_std_params(
         &self,
-        original_indices_of_qc_samples: &[isize], // Original indices of samples that passed sample QC.
-        num_qc_samples: usize,                   // Count of samples that passed sample QC.
+        original_indices_of_qc_samples_arc: &Arc<Vec<isize>>, // Arc'd original indices of QC'd samples
+        num_qc_samples: usize,                               // Count of QC'd samples
     ) -> Result<(Vec<IntermediateSnpDetails>, usize), ThreadSafeStdError> {
-        info!("SNP QC & Standardization Params for {} samples...", num_qc_samples);
+        info!("Starting SNP QC & Standardization Params calculation for {} QC'd samples using IoService.", num_qc_samples);
+
         if num_qc_samples == 0 {
-            debug!("No QC samples, skipping SNP QC.");
+            debug!("No QC samples provided; skipping SNP QC and returning empty results.");
             return Ok((Vec::new(), 0));
         }
 
-        // Clone data needed by closures to satisfy lifetime/capture requirements.
-        // Arcs are cheap to clone as they only copy the pointer and increment ref count.
-        let bed_file_path_for_init = self.config.bed_file_path.clone();
-        let qc_sample_indices_arc = Arc::new(original_indices_of_qc_samples.to_vec());
+        const SNP_BATCH_SIZE: usize = 10000; // Number of SNPs to process per batch
+        const IO_REQUEST_DEFAULT_TIMEOUT: Duration = Duration::from_secs(60); // Timeout for waiting for an actor response for a single SNP.
+
+        let num_total_initial_snps = self.initial_snp_count_from_bim;
+        let num_batches = (num_total_initial_snps + SNP_BATCH_SIZE - 1) / SNP_BATCH_SIZE;
         
-        // Capture necessary configuration and initial BIM data for use in the parallel map closure.
-        // These are already Arcs or clonable parts of config.
-        let min_snp_call_rate_threshold_val = self.config.min_snp_call_rate_threshold;
-        let min_snp_maf_threshold_val = self.config.min_snp_maf_threshold;
-        let max_snp_hwe_p_value_threshold_val = self.config.max_snp_hwe_p_value_threshold;
-        let initial_bim_chromosomes_arc = self.initial_bim_chromosomes.clone();
-        let initial_bim_bp_positions_arc = self.initial_bim_bp_positions.clone();
-        let initial_bim_allele1_alleles_arc = self.initial_bim_allele1_alleles.clone();
-        let initial_bim_allele2_alleles_arc = self.initial_bim_allele2_alleles.clone();
+        let mut all_final_qc_snps_details: Vec<IntermediateSnpDetails> = Vec::with_capacity(num_total_initial_snps / 2); // Pre-allocate optimistically
 
-        // Process SNPs in parallel. Each thread gets its own Bed reader.
-        let final_qc_snps_options: Vec<Option<IntermediateSnpDetails>> = (0..self.initial_snp_count_from_bim)
-            .into_par_iter()
-            .map_init(
-                || { // INIT CLOSURE: Runs ONCE PER RAYON WORKER THREAD
-                    Bed::new(&bed_file_path_for_init)
-                        .map_err(|e| {
-                            // Log error here. The map closure will receive Err.
-                            error!("SNP QC Thread Init: Failed to open BED '{}': {:?}", bed_file_path_for_init, e);
-                            e 
-                        })
-                },
-                |bed_init_result, original_m_idx| { // MAP CLOSURE: Runs for each SNP
-                    match bed_init_result {
-                        Ok(ref mut thread_local_bed) => { // Successfully initialized Bed for this thread
-                            let snp_genotypes_n_x_1_result = ReadOptions::builder()
-                                .iid_index(qc_sample_indices_arc.as_slice())
-                                .sid_index(original_m_idx as isize)
-                                .i8()
-                                .count_a1()
-                                .num_threads(1) // bed_reader uses only one thread for this read.
-                                .read(thread_local_bed);
+        info!("Processing {} initial SNPs in {} batches of (up to) {} SNPs each.", num_total_initial_snps, num_batches, SNP_BATCH_SIZE);
 
-                            match snp_genotypes_n_x_1_result {
-                                Ok(snp_genotypes_n_x_1) => {
-                                    let snp_genotype_column_view: ArrayView1<i8> = snp_genotypes_n_x_1.column(0);
+        for batch_idx in 0..num_batches {
+            let start_snp_idx_for_batch = batch_idx * SNP_BATCH_SIZE;
+            let end_snp_idx_for_batch = ((batch_idx + 1) * SNP_BATCH_SIZE).min(num_total_initial_snps);
+            
+            // Store (original_m_idx, (chromosome, bp_pos, allele1, allele2), response_rx_channel)
+            // This vector holds data that needs to be passed into the Rayon parallel closure.
+            let mut pending_responses_for_batch: Vec<(usize, (String, i32, String, String), flume::Receiver<io_service_infrastructure::IoResponse>)> =
+                Vec::with_capacity(end_snp_idx_for_batch - start_snp_idx_for_batch);
 
-                                    let num_non_missing_genotypes = snp_genotype_column_view.iter().filter(|&&g_val| g_val != -127i8).count();
-                                    if num_non_missing_genotypes == 0 { return None; }
-                                    
-                                    let call_rate = num_non_missing_genotypes as f64 / num_qc_samples as f64;
-                                    if call_rate < min_snp_call_rate_threshold_val { return None; }
-                                    
-                                    // Strict filter: no missing genotypes allowed for SNPs included in PCA, among QC'd samples.
-                                    if num_non_missing_genotypes != num_qc_samples { return None; }
+            // --- Dispatch Requests for Batch ---
+            for original_m_idx in start_snp_idx_for_batch..end_snp_idx_for_batch {
+                // Pre-fetch BIM data. These are Arc'd, so cloning is cheap.
+                let chromosome = self.initial_bim_chromosomes[original_m_idx].clone();
+                let bp_position = self.initial_bim_bp_positions[original_m_idx];
+                let allele1 = self.initial_bim_allele1_alleles[original_m_idx].clone();
+                let allele2 = self.initial_bim_allele2_alleles[original_m_idx].clone();
+                let pre_fetched_bim_data = (chromosome, bp_position, allele1, allele2);
 
-                                    let mut allele1_dosage_sum_f64: f64 = 0.0;
-                                    let mut observed_hom_ref_count: f64 = 0.0;
-                                    let mut observed_het_count: f64 = 0.0;
-                                    let mut observed_hom_alt_count: f64 = 0.0;
+                let (response_tx, response_rx) = flume::bounded(1); // Each request gets its own response channel
+                
+                let request = io_service_infrastructure::IoRequest::GetSnpDataForQc {
+                    original_m_idx,
+                    qc_sample_indices: Arc::clone(original_indices_of_qc_samples_arc),
+                    response_tx,
+                };
 
-                                    for &genotype_val_i8 in snp_genotype_column_view.iter() {
-                                        let dosage_f64 = genotype_val_i8 as f64;
-                                        allele1_dosage_sum_f64 += dosage_f64;
-                                        match genotype_val_i8 {
-                                            0 => observed_hom_ref_count += 1.0,
-                                            1 => observed_het_count += 1.0,
-                                            2 => observed_hom_alt_count += 1.0,
-                                            _ => { /* Unreachable with current strict missingness filter */ }
-                                        }
+                if let Err(e_send) = self.io_service.request_tx.send(request) {
+                    let err_msg = format!("Failed to send SNP QC request for original_m_idx {} (batch {}): {}. SNP QC cannot proceed.", original_m_idx, batch_idx, e_send);
+                    error!("{}", err_msg);
+                    return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+                }
+                pending_responses_for_batch.push((original_m_idx, pre_fetched_bim_data, response_rx));
+            }
+            debug!("Batch {}: Dispatched {} requests to IoService.", batch_idx, pending_responses_for_batch.len());
+
+            // --- Process Responses for Batch (Parallel using Rayon) ---
+            // Clone necessary config values for use in the Rayon closure.
+            let min_snp_call_rate_thresh = self.config.min_snp_call_rate_threshold;
+            let min_snp_maf_thresh = self.config.min_snp_maf_threshold;
+            let max_snp_hwe_p_thresh = self.config.max_snp_hwe_p_value_threshold;
+
+            let batch_qc_results: Vec<IntermediateSnpDetails> = pending_responses_for_batch
+                .into_par_iter()
+                .filter_map(|(original_m_idx, pre_fetched_bim, response_rx)| {
+                    match response_rx.recv_timeout(IO_REQUEST_DEFAULT_TIMEOUT) {
+                        Ok(io_service_infrastructure::IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }) => {
+                            match raw_genotypes_i8_result {
+                                Ok(genotype_array_i8_snp_col) => {
+                                    // --- Strict Missing Data Excision ---
+                                    if genotype_array_i8_snp_col.iter().any(|&g_val| g_val == -127i8) {
+                                        debug!("SNP QC (idx {}): Failed due to missing genotypes (-127i8) among QC'd samples.", original_m_idx);
+                                        return None; 
                                     }
-                                    
-                                    let total_alleles_observed_f64 = 2.0 * num_qc_samples as f64;
-                                    let allele1_frequency = allele1_dosage_sum_f64 / total_alleles_observed_f64;
-                                    let minor_allele_frequency = allele1_frequency.min(1.0 - allele1_frequency);
-                                    
-                                    // Filter by MAF. Also filter if monomorphic (freq effectively 0 or 1).
-                                    if minor_allele_frequency < min_snp_maf_threshold_val || 
-                                       allele1_frequency.abs() < 1e-9 || 
-                                       (1.0 - allele1_frequency).abs() < 1e-9 {
+                                    // Call rate is effectively 1.0 if no missing data was found for num_qc_samples.
+                                    // If genotype_array_i8_snp_col.len() != num_qc_samples, it implies an issue.
+                                    // For now, assume IoService actor correctly fetched data for all qc_sample_indices.
+                                    if genotype_array_i8_snp_col.len() != num_qc_samples {
+                                        warn!("SNP QC (idx {}): Genotype array length ({}) does not match num_qc_samples ({}). Skipping.", 
+                                              original_m_idx, genotype_array_i8_snp_col.len(), num_qc_samples);
                                         return None;
                                     }
 
-                                    // HWE Test if threshold is set to be restrictive (not 1.0)
-                                    if max_snp_hwe_p_value_threshold_val < 1.0 {
-                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(
-                                            observed_hom_ref_count, observed_het_count, observed_hom_alt_count, num_qc_samples as f64
-                                        );
-                                        if hwe_p_val <= max_snp_hwe_p_value_threshold_val { return None; }
+                                    // --- Other QC Checks (MAF, HWE) ---
+                                    let mut allele1_dosage_sum_f64: f64 = 0.0;
+                                    let mut obs_hom_ref: f64 = 0.0; let mut obs_het: f64 = 0.0; let mut obs_hom_alt: f64 = 0.0;
+
+                                    for &g_val_i8 in genotype_array_i8_snp_col.iter() {
+                                        allele1_dosage_sum_f64 += g_val_i8 as f64;
+                                        match g_val_i8 {
+                                            0 => obs_hom_ref += 1.0, 1 => obs_het += 1.0, 2 => obs_hom_alt += 1.0,
+                                            _ => { /* Should not happen if -127 was checked */ }
+                                        }
                                     }
+
+                                    let total_alleles_obs_f64 = 2.0 * num_qc_samples as f64;
+                                    let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64;
+                                    let maf = allele1_freq.min(1.0 - allele1_freq);
+
+                                    if maf < min_snp_maf_thresh || allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
+                                        debug!("SNP QC (idx {}): Failed MAF check (MAF={:.4}, threshold={:.4}).", original_m_idx, maf, min_snp_maf_thresh);
+                                        return None;
+                                    }
+
+                                    if max_snp_hwe_p_thresh < 1.0 { // Only test if HWE threshold is restrictive
+                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt, num_qc_samples as f64);
+                                        if hwe_p_val <= max_snp_hwe_p_thresh {
+                                            debug!("SNP QC (idx {}): Failed HWE check (p-val={:.2e}, threshold={:.2e}).", original_m_idx, hwe_p_val, max_snp_hwe_p_thresh);
+                                            return None;
+                                        }
+                                    }
+
+                                    // --- Calculate Stats (Mean, StdDev) ---
+                                    let mean_f32 = (allele1_dosage_sum_f64 / num_qc_samples as f64) as f32;
+                                    let sum_sq_diff_f64: f64 = genotype_array_i8_snp_col.iter()
+                                        .map(|&g_val| (g_val as f64 - mean_f32 as f64).powi(2)).sum();
                                     
-                                    let mean_allele1_dosage_f32 = (allele1_dosage_sum_f64 / num_qc_samples as f64) as f32;
-                                    let sum_sq_diff_f64: f64 = snp_genotype_column_view.iter()
-                                        .map(|&g_val| (g_val as f64 - mean_allele1_dosage_f32 as f64).powi(2))
-                                        .sum();
+                                    let variance_denom = (num_qc_samples.saturating_sub(1) as f64).max(1.0);
+                                    let variance = sum_sq_diff_f64 / variance_denom;
+
+                                    if variance <= 1e-9 { // Effectively zero variance
+                                        debug!("SNP QC (idx {}): Failed due to near-zero variance ({:.2e}).", original_m_idx, variance);
+                                        return None;
+                                    }
+                                    let std_dev_f32 = (variance.sqrt()) as f32;
                                     
-                                    // Sample variance (N-1 denominator if N > 1)
-                                    let variance_denominator = (num_qc_samples.saturating_sub(1) as f64).max(1.0);
-                                    let variance_allele1_dosage = sum_sq_diff_f64 / variance_denominator;
-                                    
-                                    // Filter if variance is effectively zero (prevents division by zero later)
-                                    if variance_allele1_dosage <= 1e-9 { return None; }
-                                    let std_dev_allele1_dosage_f32 = (variance_allele1_dosage.sqrt()) as f32;
-                                    
-                                    // If all QC checks pass, construct and return the details.
+                                    let (chromosome, bp_pos, allele1, allele2) = pre_fetched_bim;
                                     Some(IntermediateSnpDetails {
-                                        original_m_idx,
-                                        chromosome: initial_bim_chromosomes_arc[original_m_idx].clone(),
-                                        bp_position: initial_bim_bp_positions_arc[original_m_idx],
-                                        allele1: initial_bim_allele1_alleles_arc[original_m_idx].clone(),
-                                        allele2: initial_bim_allele2_alleles_arc[original_m_idx].clone(),
-                                        mean_allele1_dosage: Some(mean_allele1_dosage_f32),
-                                        std_dev_allele1_dosage: Some(std_dev_allele1_dosage_f32),
+                                        original_m_idx, chromosome, bp_position: bp_pos, allele1, allele2,
+                                        mean_allele1_dosage: Some(mean_f32),
+                                        std_dev_allele1_dosage: Some(std_dev_f32),
                                     })
                                 }
-                                Err(e) => {
-                                    warn!("SNP QC: Read failed for original SNP idx {}: {:?}", original_m_idx, e);
+                                Err(e_str) => {
+                                    warn!("SNP QC (idx {}): IoService actor reported error for SNP: {}", original_m_idx, e_str);
                                     None
                                 }
                             }
                         }
-                        Err(_e_bed_init) => {
-                            // Bed initialization failed for this thread, error already logged by init closure.
-                            // This SNP cannot be processed by this particular thread.
+                        Ok(unexpected_response) => {
+                            warn!("SNP QC (idx {}): Received unexpected IoResponse type: {:?}. Expected RawSnpDataForQc.", original_m_idx, unexpected_response);
+                            None
+                        }
+                        Err(e_recv) => { // Timeout or channel disconnected
+                            warn!("SNP QC (idx {}): Failed to receive response from IoService actor (timeout or disconnect): {}", original_m_idx, e_recv);
                             None
                         }
                     }
-                }
-            )
-            .collect();
+                })
+                .collect();
+            
+            debug!("Batch {}: Processed {} responses, got {} QC-passing SNPs.", batch_idx, pending_responses_for_batch.len(), batch_qc_results.len());
+            all_final_qc_snps_details.extend(batch_qc_results);
+            info!("SNP QC Progress: After batch {}/{}, total QC'd SNPs found: {}", batch_idx + 1, num_batches, all_final_qc_snps_details.len());
+        }
 
-        // Filter out the Nones from SNPs that failed QC or couldn't be read
-        let final_qc_snps_details: Vec<IntermediateSnpDetails> = final_qc_snps_options.into_iter().flatten().collect();
-
-        let num_final_qc_snps = final_qc_snps_details.len();
-        info!("SNP QC & Stats: {} / {} initial SNPs passed all filters.", num_final_qc_snps, self.initial_snp_count_from_bim);
-        Ok((final_qc_snps_details, num_final_qc_snps))
+        let num_final_qc_snps = all_final_qc_snps_details.len();
+        info!("SNP QC & Stats calculation complete. {} / {} initial SNPs passed all filters.", num_final_qc_snps, num_total_initial_snps);
+        Ok((all_final_qc_snps_details, num_final_qc_snps))
     }
     
     fn map_snps_to_ld_blocks(
@@ -603,8 +1262,8 @@ impl MicroarrayDataPreparer {
 /// to make sure we have thread safety given the Bed reader's internal structure.
 #[derive(Clone)]
 pub struct MicroarrayGenotypeAccessor {
-    /// Path to the BED file.
-    bed_file_path: String,
+    // bed_file_path: String, // Removed
+    io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>, // Added
     original_indices_of_qc_samples: Arc<Vec<isize>>,
     original_indices_of_pca_snps: Arc<Vec<usize>>, 
     mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
@@ -617,13 +1276,14 @@ impl MicroarrayGenotypeAccessor {
     /// Creates a new MicroarrayGenotypeAccessor.
     /// Stores the path to the BED file and other necessary metadata.
     pub fn new(
-        bed_file_path: String, // Path to the BED file.
+        // bed_file_path: String, // Removed
         original_indices_of_qc_samples: Arc<Vec<isize>>,
         original_indices_of_pca_snps: Arc<Vec<usize>>,
         mean_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
         std_devs_allele1_dosages_for_pca_snps: Arc<Array1<f32>>,
         num_total_qc_samples: usize,
         num_total_pca_snps: usize,
+        io_request_tx: flume::Sender<io_service_infrastructure::IoRequest>, // Added
     ) -> Self { // Constructor now returns Self directly
         assert_eq!(original_indices_of_qc_samples.len(), num_total_qc_samples, "Accessor: Sample count mismatch");
         assert_eq!(original_indices_of_pca_snps.len(), num_total_pca_snps, "Accessor: D_blocked SNP original index count mismatch");
@@ -631,7 +1291,8 @@ impl MicroarrayGenotypeAccessor {
         assert_eq!(std_devs_allele1_dosages_for_pca_snps.len(), num_total_pca_snps, "Accessor: StdDev dosage vector length mismatch");
 
         Self {
-            bed_file_path, // Store the path
+            // bed_file_path, // Removed
+            io_request_tx, // Added
             original_indices_of_qc_samples,
             original_indices_of_pca_snps,
             mean_allele1_dosages_for_pca_snps,
@@ -677,51 +1338,132 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
             .map(|qc_id| self.original_indices_of_qc_samples[qc_id.0])
             .collect();
 
-        // Open a new Bed instance for each call to this method.
-        // This is necessary because bed_reader::Bed is not Send/Sync due to internal Rc.
-        let mut bed_instance = Bed::new(&self.bed_file_path)
-            .map_err(|e| Box::new(DataPrepError::from(format!("Failed to open BED file '{}' in get_standardized_block: {}", self.bed_file_path, e))) as ThreadSafeStdError)?;
+        // 1. Remove Old BED Reading Logic: Done by deleting the previous content.
+
+        // 2. Handle Empty Input
+        if num_requested_snps == 0 || num_requested_samples == 0 {
+            // Return an empty Array2<f32> with dimensions (num_requested_snps, num_requested_samples)
+            // This is consistent with behavior if, for example, num_requested_snps = 0, num_requested_samples = 10,
+            // it should return a 0x10 matrix.
+            return Ok(Array2::zeros((num_requested_snps, num_requested_samples)));
+        }
+
+        // 3. Translate IDs
+        let original_m_indices_for_bed: Vec<isize> = pca_snp_ids_to_fetch.iter()
+            .map(|pca_id| self.original_indices_of_pca_snps[pca_id.0] as isize)
+            .collect();
         
-        let raw_dosages_samples_by_snps_i8 = ReadOptions::builder()
-            .iid_index(&bed_reader_sample_indices) 
-            .sid_index(&bed_reader_snp_indices) 
-            .i8().count_a1().read(&mut bed_instance) // Use the locally created Bed instance
-            .map_err(|e_bed_read| Box::new(DataPrepError::from(format!("Bed read failed in get_standardized_block: {}", e_bed_read))) as ThreadSafeStdError)?;
+        let requested_original_sample_indices_for_bed: Vec<isize> = qc_sample_ids_to_fetch.iter()
+            .map(|qc_id| self.original_indices_of_qc_samples[qc_id.0])
+            .collect();
 
-        let raw_dosages_snps_by_samples_i8 = raw_dosages_samples_by_snps_i8.t();
-        let mut standardized_block_snps_by_samples_f32 = Array2::<f32>::zeros(raw_dosages_snps_by_samples_i8.raw_dim());
+        // 4. Send Request to IoService
+        let (response_tx, response_rx) = flume::bounded(1);
+        let request = io_service_infrastructure::IoRequest::GetSnpBlockForEigen {
+            original_m_indices_for_bed, // These are original BIM indices
+            original_sample_indices_for_bed: Arc::new(requested_original_sample_indices_for_bed), // Arc for potential sharing
+            response_tx,
+        };
+        
+        // Re-use timeout from SNP QC, or define a specific one for accessor if different characteristics.
+        // For now, reusing IO_REQUEST_DEFAULT_TIMEOUT from perform_snp_qc_and_calc_std_params's scope.
+        // This constant would ideally be part of io_service_infrastructure or globally available.
+        // For this exercise, let's assume it's accessible or redefine if needed.
+        // For now, let's use a hardcoded value similar to the one in perform_snp_qc_and_calc_std_params
+        const ACCESSOR_IO_TIMEOUT: Duration = Duration::from_secs(60);
 
-        for i_req_snp in 0..num_requested_snps {
-            let current_pca_snp_id_val = pca_snp_ids_to_fetch[i_req_snp].0; 
-            let mean_dosage = self.mean_allele1_dosages_for_pca_snps[current_pca_snp_id_val];
-            let std_dev_dosage = self.std_devs_allele1_dosages_for_pca_snps[current_pca_snp_id_val];
-            
-            let mut output_std_snp_row = standardized_block_snps_by_samples_f32.row_mut(i_req_snp);
-            let input_raw_snp_row_view = raw_dosages_snps_by_samples_i8.row(i_req_snp);
 
-            if std_dev_dosage.abs() < 1e-9 { 
-                output_std_snp_row.fill(0.0);
-            } else {
-                for i_req_sample in 0..num_requested_samples {
-                    let raw_dosage_val_i8 = input_raw_snp_row_view[i_req_sample];
-                    if raw_dosage_val_i8 == -127 { // Missing genotype. This should not happen if QC filters are effective.
-                        // This indicates an issue, as SNPs with missing data (among QC'd samples)
-                        // should have been filtered out by `perform_snp_qc_and_calc_std_params`.
-                        let error_message = format!(
-                            "Unexpected missing genotype encountered in get_standardized_block for PCA SNP ID {} (original BIM index {}), QC'd sample index {}. SNPs with missing data among QC'd samples should be filtered prior to this stage.",
-                            current_pca_snp_id_val,
-                            self.original_indices_of_pca_snps[current_pca_snp_id_val], // Provides more context
-                            qc_sample_ids_to_fetch[i_req_sample].0
-                        );
-                        error!("{}", error_message); // Log the critical error
-                        return Err(Box::new(DataPrepError::from(error_message)) as ThreadSafeStdError);
-                    } else {
-                        output_std_snp_row[i_req_sample] = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
+        match self.io_request_tx.send_timeout(request, ACCESSOR_IO_TIMEOUT) {
+            Ok(_) => { /* Request sent successfully */ }
+            Err(flume::SendTimeoutError::Timeout(_)) => { // Corrected pattern
+                let err_msg = "Timeout sending IoRequest::GetSnpBlockForEigen to IoService".to_string();
+                error!("{}", err_msg);
+                return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+            }
+            Err(flume::SendTimeoutError::Disconnected(_)) => {
+                let err_msg = "IoService request channel disconnected while sending GetSnpBlockForEigen".to_string();
+                error!("{}", err_msg);
+                return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+            }
+        }
+
+        // 5. Receive Raw Data from IoService
+        match response_rx.recv_timeout(ACCESSOR_IO_TIMEOUT) {
+            Ok(io_service_infrastructure::IoResponse::SnpBlockData { raw_i8_block_result }) => {
+                match raw_i8_block_result {
+                    Ok(raw_dosages_snps_by_samples_i8_array2) => {
+                        // Data received successfully, proceed to standardization.
+                        // Expected orientation: SNPs x Samples
+                        if raw_dosages_snps_by_samples_i8_array2.nrows() != num_requested_snps || 
+                           raw_dosages_snps_by_samples_i8_array2.ncols() != num_requested_samples {
+                            let err_msg = format!("IoService returned SnpBlockData with unexpected dimensions. Expected: {}x{}, Got: {}x{}",
+                                                  num_requested_snps, num_requested_samples,
+                                                  raw_dosages_snps_by_samples_i8_array2.nrows(), raw_dosages_snps_by_samples_i8_array2.ncols());
+                            error!("{}", err_msg);
+                            return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+                        }
+
+                        // 6. On-the-Fly Standardization
+                        let mut standardized_block_f32 = Array2::<f32>::uninit(raw_dosages_snps_by_samples_i8_array2.raw_dim());
+
+                        for i_req_snp in 0..num_requested_snps {
+                            let pca_snp_id_val = pca_snp_ids_to_fetch[i_req_snp].0;
+                            let mean_dosage = self.mean_allele1_dosages_for_pca_snps[pca_snp_id_val];
+                            let std_dev_dosage = self.std_devs_allele1_dosages_for_pca_snps[pca_snp_id_val];
+                            
+                            let raw_snp_row = raw_dosages_snps_by_samples_i8_array2.row(i_req_snp);
+                            let mut standardized_snp_row_to_fill = standardized_block_f32.row_mut(i_req_snp);
+
+                            if std_dev_dosage.abs() < 1e-9 { // Near-zero variance
+                                for i_req_sample in 0..num_requested_samples {
+                                    let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
+                                    if raw_dosage_val_i8 == -127i8 {
+                                        let err_msg = format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                              pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0);
+                                        error!("{}", err_msg);
+                                        return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+                                    }
+                                    unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(0.0f32); }
+                                }
+                            } else {
+                                for i_req_sample in 0..num_requested_samples {
+                                    let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
+                                    if raw_dosage_val_i8 == -127i8 {
+                                         let err_msg = format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                              pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0);
+                                        error!("{}", err_msg);
+                                        return Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError);
+                                    }
+                                    let standardized_val = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
+                                    unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(standardized_val); }
+                                }
+                            }
+                        }
+                        Ok(unsafe { standardized_block_f32.assume_init() })
+                    }
+                    Err(e_str) => {
+                        let err_msg = format!("IoService actor failed to read SNP block: {}", e_str);
+                        error!("{}", err_msg);
+                        Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
                     }
                 }
             }
+            Ok(unexpected_response) => {
+                let err_msg = format!("Received unexpected IoResponse type from IoService: {:?}. Expected SnpBlockData.", unexpected_response);
+                error!("{}", err_msg);
+                Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
+            }
+            Err(flume::RecvTimeoutError::Timeout) => {
+                let err_msg = "Timeout receiving SnpBlockData from IoService".to_string();
+                error!("{}", err_msg);
+                Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
+            }
+            Err(flume::RecvTimeoutError::Disconnected) => {
+                let err_msg = "IoService response channel disconnected while waiting for SnpBlockData".to_string();
+                error!("{}", err_msg);
+                Err(Box::new(DataPrepError(err_msg)) as ThreadSafeStdError)
+            }
         }
-        Ok(standardized_block_snps_by_samples_f32)
     }
 
     fn num_pca_snps(&self) -> usize { self.num_total_pca_snps }

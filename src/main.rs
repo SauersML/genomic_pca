@@ -21,6 +21,24 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use libc; // Added for getrlimit
+
+// --- Helper Function to Query Soft Resource Limits ---
+fn get_rlimit_soft(resource: libc::c_uint) -> Result<usize, std::io::Error> {
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(resource, &mut rlim) } == 0 {
+        if rlim.rlim_cur == libc::RLIM_INFINITY {
+            Ok(usize::MAX / 2) // Return a large value for infinity
+        } else {
+            Ok(rlim.rlim_cur as usize)
+        }
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
 
 // --- Imports for Local Project Crates/Modules (Workflows) ---
 use crate::cli::CliArgs;
@@ -203,6 +221,38 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
 fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     info!("Initializing EigenSNP-Rust PCA workflow.");
 
+    // Query System Resource Limits
+    let rlimit_nofile_soft = match get_rlimit_soft(libc::RLIMIT_NOFILE) {
+        Ok(limit) => limit,
+        Err(e) => {
+            warn!("Failed to query RLIMIT_NOFILE: {}. Using default: 1024.", e);
+            1024
+        }
+    };
+    let rlimit_nproc_soft = match get_rlimit_soft(libc::RLIMIT_NPROC) {
+        Ok(limit) => limit,
+        Err(e) => {
+            warn!("Failed to query RLIMIT_NPROC: {}. Using default: 10240.", e);
+            10240
+        }
+    };
+    let _physical_cpus = num_cpus::get_physical(); // Not used in budget calculation yet, but good to query
+
+    // Calculate Resource Budgets
+    const FDS_RESERVED_FOR_RUNTIME: usize = 50;
+    const THREADS_RESERVED_FOR_RUNTIME_AND_COMPUTE_POOL_BASE: usize = 10;
+    
+    let actual_num_compute_threads = rayon::current_num_threads();
+
+    let max_io_actors_by_fds = (rlimit_nofile_soft.saturating_sub(FDS_RESERVED_FOR_RUNTIME)).max(1);
+    let max_io_actors_by_nproc = (rlimit_nproc_soft.saturating_sub(actual_num_compute_threads).saturating_sub(THREADS_RESERVED_FOR_RUNTIME_AND_COMPUTE_POOL_BASE)).max(1);
+    let absolute_max_io_actors_for_ioservice = max_io_actors_by_fds.min(max_io_actors_by_nproc);
+
+    // Log Derived Boundaries
+    info!("Resource Limits & Budgets: RLIMIT_NOFILE_SOFT={}, RLIMIT_NPROC_SOFT={}, Actual Rayon Compute Threads={}, Max IO Actors for IO Service={}",
+        rlimit_nofile_soft, rlimit_nproc_soft, actual_num_compute_threads, absolute_max_io_actors_for_ioservice
+    );
+
     // 1. Create Configurations from cli_args
     let bed_file_path_str = cli_args.bed_file.as_ref()
         .ok_or_else(|| anyhow!("--bed-file is required when --eigensnp is used"))?
@@ -239,7 +289,10 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
 
     // 2. Prepare Data using MicroarrayDataPreparer (from crate::prepare)
     info!("Initializing MicroarrayDataPreparer (from src/prepare.rs)...");
-    let preparer = MicroarrayDataPreparer::try_new(prep_config)
+    let preparer = MicroarrayDataPreparer::try_new(
+        prep_config,
+        absolute_max_io_actors_for_ioservice, // New argument
+    )
         .map_err(|e| anyhow!("Failed to initialize MicroarrayDataPreparer from src/prepare.rs: {}", e))?;
 
     info!("Preparing data for EigenSNP-Rust (using src/prepare.rs)...");
