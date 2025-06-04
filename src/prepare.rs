@@ -1,6 +1,6 @@
 use flume;
 use log::{debug, error, info, warn};
-use ndarray::{Array2};
+use ndarray::{Array1, Array2}; // do not remove Array1
 use num_cpus;
 use rayon::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
