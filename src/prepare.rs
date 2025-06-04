@@ -1,6 +1,7 @@
 use flume;
 use log::{debug, error, info, warn};
 use ndarray::{Array1, Array2};
+use num_cpus;
 use rayon::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::{HashMap, HashSet};
@@ -176,9 +177,13 @@ mod io_service_infrastructure {
 
     #[derive(Debug)]
     pub(crate) enum IoRequest {
-        GetSnpDataForQc {
-            original_m_idx: usize,
+        /// Request to fetch genotype data for a chunk of SNPs for QC purposes.
+        GetSnpChunkForQc {
+            /// Original BIM indices for the SNPs in the requested chunk.
+            original_m_indices: Vec<usize>,
+            /// Original FAM indices of the samples to include in the QC.
             qc_sample_indices: Arc<Vec<isize>>,
+            /// Channel to send the response back.
             response_tx: flume::Sender<IoResponse>,
         },
         GetSnpBlockForEigen {
@@ -193,8 +198,14 @@ mod io_service_infrastructure {
     /// Ndarray Arrays are Send/Sync if their elements are; String is; Result is if Ok/Err are.
     #[derive(Debug)]
     pub(crate) enum IoResponse {
-        RawSnpDataForQc {
-            raw_genotypes_i8_result: Result<Array1<i8>, String>,
+        /// Response containing raw genotype data for a chunk of SNPs requested for QC.
+        RawSnpChunkForQc {
+            /// Result containing an Array2<i8> of genotypes (samples x SNPs_in_chunk, C-order)
+            /// or an error string.
+            raw_genotypes_i8_chunk_result: Result<Array2<i8>, String>,
+            /// The original BIM indices corresponding to the columns of the returned Array2.
+            /// This is crucial for mapping results back to the correct SNPs.
+            original_m_indices_in_chunk: Vec<usize>,
         },
         SnpBlockData {
             raw_i8_block_result: Result<Array2<i8>, String>,
@@ -264,8 +275,14 @@ mod io_service_infrastructure {
             let (request_tx, request_rx_shared) = flume::bounded::<IoRequest>(request_channel_capacity);
             let (metrics_tx, metrics_rx) = flume::bounded::<IoTaskMetrics>(metrics_channel_capacity);
 
-            let initial_target_actors =
-                std::cmp::min(MIN_OPERATIONAL_IO_ACTORS, absolute_max_actors).max(1);
+            // Set initial target actors to a more responsive number, e.g., number of logical CPUs,
+            // but capped by absolute_max_actors and at least 1.
+            // This helps in utilizing resources better from the start for chunked I/O.
+            let desired_initial_actors = num_cpus::get(); // Get number of logical CPUs
+            // MIN_OPERATIONAL_IO_ACTORS is 1, as defined in io_service_controller_loop.
+            // Using 1 directly here for clarity as the const is not in scope.
+            const MIN_OP_ACTORS_FOR_INIT: usize = 1;
+            let initial_target_actors = desired_initial_actors.max(MIN_OP_ACTORS_FOR_INIT).min(absolute_max_actors);
             info!(
                 "IoService: Initial target actors set to {}",
                 initial_target_actors
@@ -590,37 +607,63 @@ mod io_service_infrastructure {
                     let mut bytes_read_for_task: usize = 0;
 
                     match request {
-                        IoRequest::GetSnpDataForQc {
-                            original_m_idx,
+                        IoRequest::GetSnpChunkForQc {
+                            original_m_indices, // This is now Vec<usize>
                             qc_sample_indices,
                             response_tx,
                         } => {
                             let qc_sample_indices_slice: &[isize] = qc_sample_indices.as_slice();
+                            // Convert original_m_indices (Vec<usize>) to Vec<isize> for bed_reader
+                            let original_m_indices_isize: Vec<isize> = original_m_indices
+                                .iter()
+                                .map(|&idx| idx as isize)
+                                .collect();
+
+                            // Read an entire chunk of SNPs.
+                            // Request C-order to get data as (samples, snps_in_chunk),
+                            // which is convenient for column-wise (per-SNP) QC processing later.
                             let read_result = ReadOptions::builder()
-                                .sid_index(original_m_idx as isize)
+                                .sid_index(original_m_indices_isize.as_slice()) // Pass the chunk of SIDs
                                 .iid_index(qc_sample_indices_slice)
-                                .i8()
-                                .count_a1()
+                                .i8() // Output as i8, suitable for dosage
+                                .c()  // Request C-order: (samples x SNPs_in_chunk)
+                                .count_a1() // Standard allele counting
+                                .num_threads(0) // Allow bed-reader to use its internal default Rayon parallelism
                                 .read(&mut bed_reader_instance);
 
-                            let raw_genotypes_i8_result = match read_result {
-                                Ok(array_samples_x_snp) => {
-                                    // Approx bytes based on genotype dimensions: (num_samples * 1 snp + 3) / 4 bytes per genotype (packed BED estimate, ceiling division).
-                                    bytes_read_for_task = (array_samples_x_snp.len_of(ndarray::Axis(0)) * 1 + 3) / 4;
-                                    Ok(array_samples_x_snp.column(0).to_owned())
+                            let response = match read_result {
+                                Ok(array_samples_x_snps_in_chunk) => {
+                                    // array_samples_x_snps_in_chunk has dimensions (num_qc_samples, original_m_indices.len())
+                                    // Estimate bytes read for the chunk.
+                                    bytes_read_for_task = (array_samples_x_snps_in_chunk.nrows() * array_samples_x_snps_in_chunk.ncols() + 3) / 4;
+                                    IoResponse::RawSnpChunkForQc {
+                                        raw_genotypes_i8_chunk_result: Ok(array_samples_x_snps_in_chunk),
+                                        original_m_indices_in_chunk: original_m_indices, // Pass back original indices for mapping
+                                    }
                                 }
                                 Err(e) => {
-                                    warn!("IoActor [{}]: Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", actor_id, original_m_idx, e);
-                                    Err(format!("Bed read failed for GetSnpDataForQc (SNP original_idx {}): {:?}", original_m_idx, e))
+                                    let num_snps_in_failed_chunk = original_m_indices.len();
+                                    let first_snp_idx_in_failed_chunk = original_m_indices.first().map_or_else(|| "N/A".to_string(), |v| v.to_string());
+                                    warn!(
+                                        "IoActor [{}]: Bed read failed for GetSnpChunkForQc ({} SNPs, starting original_idx {}): {:?}",
+                                        actor_id, num_snps_in_failed_chunk, first_snp_idx_in_failed_chunk, e
+                                    );
+                                    IoResponse::RawSnpChunkForQc {
+                                        raw_genotypes_i8_chunk_result: Err(format!(
+                                            "Bed read failed for GetSnpChunkForQc ({} SNPs, starting original_idx {}): {:?}",
+                                            num_snps_in_failed_chunk, first_snp_idx_in_failed_chunk, e
+                                        )),
+                                        original_m_indices_in_chunk: original_m_indices,
+                                    }
                                 }
                             };
-                            if response_tx
-                                .send(IoResponse::RawSnpDataForQc {
-                                    raw_genotypes_i8_result,
-                                })
-                                .is_err()
+                            if response_tx.send(response).is_err()
                             {
-                                debug!("IoActor [{}]: Failed to send RawSnpDataForQc response for SNP original_idx {}. Receiver likely dropped.", actor_id, original_m_idx);
+                                let first_snp_idx_in_dropped_chunk = original_m_indices.first().map_or_else(|| "N/A".to_string(), |v| v.to_string());
+                                debug!(
+                                    "IoActor [{}]: Failed to send RawSnpChunkForQc response for chunk starting with original_idx {}. Receiver likely dropped.",
+                                    actor_id, first_snp_idx_in_dropped_chunk
+                                );
                             }
                         }
                         IoRequest::GetSnpBlockForEigen {
@@ -1083,188 +1126,238 @@ impl MicroarrayDataPreparer {
             return Ok((Vec::new(), 0));
         }
 
-        const SNP_BATCH_SIZE: usize = 10000;
+        // Define the chunk size for I/O requests. This determines how many SNPs are read by bed_reader in a single call.
+        // A value around 1000-5000 can be a good balance.
+        const SNP_IO_CHUNK_SIZE: usize = 2000; // Tunable parameter
 
         let num_total_initial_snps = self.initial_snp_count_from_bim;
-        let num_batches = (num_total_initial_snps + SNP_BATCH_SIZE - 1) / SNP_BATCH_SIZE;
+        // Calculate the number of I/O chunks based on the total SNPs and the chosen I/O chunk size.
+        let num_io_chunks = (num_total_initial_snps + SNP_IO_CHUNK_SIZE - 1) / SNP_IO_CHUNK_SIZE;
 
         let mut all_final_qc_snps_details: Vec<IntermediateSnpDetails> =
-            Vec::with_capacity(num_total_initial_snps / 2);
+            Vec::with_capacity(num_total_initial_snps / 2); // Pre-allocate with a rough estimate
 
         info!(
-            "Processing {} initial SNPs in {} batches of (up to) {} SNPs each.",
-            num_total_initial_snps, num_batches, SNP_BATCH_SIZE
+            "Processing {} initial SNPs in {} I/O chunks of (up to) {} SNPs each for QC.",
+            num_total_initial_snps, num_io_chunks, SNP_IO_CHUNK_SIZE
         );
 
-        for batch_idx in 0..num_batches {
-            let start_snp_idx_for_batch = batch_idx * SNP_BATCH_SIZE;
-            let end_snp_idx_for_batch =
-                ((batch_idx + 1) * SNP_BATCH_SIZE).min(num_total_initial_snps);
+        // Create a vector of original SNP indices (0-based) to be chunked.
+        let original_snp_indices_0_based: Vec<usize> = (0..num_total_initial_snps).collect();
 
-            let mut pending_responses_for_batch: Vec<(
-                usize,
-                (String, i32),
-                flume::Receiver<io_service_infrastructure::IoResponse>,
-            )> = Vec::with_capacity(end_snp_idx_for_batch - start_snp_idx_for_batch);
+        // Iterate over chunks of original SNP indices to create I/O requests.
+        // Each iteration processes one I/O chunk: sends request, waits for response, then QCs SNPs in response.
+        for (io_chunk_idx, original_m_indices_for_current_io_chunk) in
+            original_snp_indices_0_based.chunks(SNP_IO_CHUNK_SIZE).enumerate()
+        {
+            let (response_tx, response_rx) = flume::bounded(1);
+            let request = io_service_infrastructure::IoRequest::GetSnpChunkForQc {
+                original_m_indices: original_m_indices_for_current_io_chunk.to_vec(),
+                qc_sample_indices: Arc::clone(original_indices_of_qc_samples_arc),
+                response_tx,
+            };
 
-            for original_m_idx in start_snp_idx_for_batch..end_snp_idx_for_batch {
-                let chromosome = self.initial_bim_chromosomes[original_m_idx].clone();
-                let bp_position = self.initial_bim_bp_positions[original_m_idx];
-                // let allele1 = self.initial_bim_allele1_alleles[original_m_idx].clone(); // Removed for dead_code
-                // let allele2 = self.initial_bim_allele2_alleles[original_m_idx].clone(); // Removed for dead_code
-                let pre_fetched_bim_data = (chromosome, bp_position);
-
-                let (response_tx, response_rx) = flume::bounded(1);
-
-                let request = io_service_infrastructure::IoRequest::GetSnpDataForQc {
-                    original_m_idx,
-                    qc_sample_indices: Arc::clone(original_indices_of_qc_samples_arc),
-                    response_tx,
-                };
-
-                if let Err(e_send) = self.io_service.request_tx.send(request) {
-                    return Err(e_send)
-                        .wrap_err_with_context(|| format!("Failed to send SNP QC request for original_m_idx {} (batch {}). SNP QC cannot proceed.", original_m_idx, batch_idx));
-                }
-                pending_responses_for_batch.push((
-                    original_m_idx,
-                    pre_fetched_bim_data,
-                    response_rx,
-                ));
+            // Send the chunked request to the IoService.
+            if let Err(e_send) = self.io_service.request_tx.send(request) {
+                return Err(e_send).wrap_err_with_context(|| {
+                    format!(
+                        "Failed to send SNP QC request for I/O chunk {} ({} SNPs). SNP QC cannot proceed.",
+                        io_chunk_idx,
+                        original_m_indices_for_current_io_chunk.len()
+                    )
+                });
             }
             debug!(
-                "Batch {}: Dispatched {} requests to IoService.",
-                batch_idx,
-                pending_responses_for_batch.len()
+                "I/O Chunk {}: Dispatched request for {} SNPs to IoService.",
+                io_chunk_idx,
+                original_m_indices_for_current_io_chunk.len()
             );
 
-            let num_pending_responses_in_batch_for_debug = pending_responses_for_batch.len();
-
-            let min_snp_call_rate_thresh = self.config.min_snp_call_rate_threshold;
-            let min_snp_maf_thresh = self.config.min_snp_maf_threshold;
-            let max_snp_hwe_p_thresh = self.config.max_snp_hwe_p_value_threshold;
-
-            let batch_qc_results: Vec<IntermediateSnpDetails> = pending_responses_for_batch
-                .into_par_iter()
-                .filter_map(|(original_m_idx, pre_fetched_bim, response_rx)| {
-                    match response_rx.recv_timeout(io_service_infrastructure::DEFAULT_IO_OPERATION_TIMEOUT) {
-                        Ok(io_service_infrastructure::IoResponse::RawSnpDataForQc { raw_genotypes_i8_result }) => {
-                            match raw_genotypes_i8_result {
-                                Ok(genotype_array_i8_snp_col) => {
-                                    if genotype_array_i8_snp_col.len() != num_qc_samples {
-                                        warn!("SNP QC (idx {}): Genotype array length ({}) does not match num_qc_samples ({}). Skipping.",
-                                              original_m_idx, genotype_array_i8_snp_col.len(), num_qc_samples);
-                                        return None;
-                                    }
-
-                                    let valid_genotypes: Vec<i8> = genotype_array_i8_snp_col
-                                        .iter()
-                                        .filter(|&&g| g != -127i8)
-                                        .copied()
-                                        .collect();
-
-                                    let num_valid_genotypes_for_snp = valid_genotypes.len();
-
-                                    if num_qc_samples == 0 {
-                                        // If there are no samples, this SNP effectively passes call rate check (or is skipped).
-                                        // No change needed here based on current logic which seems to be 'return None' if num_qc_samples is 0 before this block.
-                                        // However, if it could reach here with num_qc_samples = 0, this check is fine.
-                                        // For safety, let's assume the existing early exit for num_qc_samples == 0 handles it.
-                                        // If not, the division by zero in call_rate calculation would be an issue.
-                                        // The current code returns None if num_qc_samples is 0 a few lines above.
-                                    } else {
-                                        let call_rate = num_valid_genotypes_for_snp as f64 / num_qc_samples as f64;
-                                        if call_rate < min_snp_call_rate_thresh {
-                                            debug!("SNP QC (idx {}): Failed call rate check. Call rate: {:.4}, Threshold: {:.4}. Valid genotypes: {}/{}. Skipping.",
-                                                   original_m_idx, call_rate, min_snp_call_rate_thresh, num_valid_genotypes_for_snp, num_qc_samples);
-                                            return None;
-                                        }
-                                    }
-
-                                    let mut allele1_dosage_sum_f64: f64 = 0.0;
-                                    let mut obs_hom_ref: usize = 0; let mut obs_het: usize = 0; let mut obs_hom_alt: usize = 0;
-
-                                    for &g_val_i8 in valid_genotypes.iter() {
-                                        allele1_dosage_sum_f64 += g_val_i8 as f64;
-                                        match g_val_i8 {
-                                            0 => obs_hom_ref += 1, 1 => obs_het += 1, 2 => obs_hom_alt += 1,
-                                            _ => { }
-                                        }
-                                    }
-
-                                    let total_alleles_obs_f64 = 2.0 * num_qc_samples as f64;
-                                    let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64;
-                                    if total_alleles_obs_f64 < 1e-9 {
-                                        debug!("SNP QC (idx {}): Total observed alleles is zero despite 100% call rate. Skipping MAF check.", original_m_idx);
-                                        return None;
-                                    }
-                                    let maf = allele1_freq.min(1.0 - allele1_freq);
-
-                                    if maf < min_snp_maf_thresh || allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
-                                        debug!("SNP QC (idx {}): Failed MAF check (MAF={:.4}, threshold={:.4}).", original_m_idx, maf, min_snp_maf_thresh);
-                                        return None;
-                                    }
-
-                                    if max_snp_hwe_p_thresh < 1.0 {
-                                        let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt);
-                                        if hwe_p_val <= max_snp_hwe_p_thresh {
-                                            debug!("SNP QC (idx {}): Failed HWE check (p-val={:.2e}, threshold={:.2e}).", original_m_idx, hwe_p_val, max_snp_hwe_p_thresh);
-                                            return None;
-                                        }
-                                    }
-
-                                    let mean_f32 = (allele1_dosage_sum_f64 / num_qc_samples as f64) as f32;
-                                    let sum_sq_diff_f64: f64 = valid_genotypes.iter()
-                                        .map(|&g_val| (g_val as f64 - mean_f32 as f64).powi(2)).sum();
-
-                                    let variance: f64;
-                                    if num_qc_samples >= 2 {
-                                        variance = sum_sq_diff_f64 / (num_qc_samples - 1) as f64;
-                                    } else {
-                                        variance = 0.0;
-                                    }
-
-                                    if variance <= 1e-9 {
-                                        debug!("SNP QC (idx {}): Failed due to near-zero variance ({:.2e}).", original_m_idx, variance);
-                                        return None;
-                                    }
-                                    let std_dev_f32 = (variance.sqrt()) as f32;
-
-                                    let (chromosome, bp_pos) = pre_fetched_bim;
-                                    Some(IntermediateSnpDetails {
-                                        original_m_idx, chromosome, bp_position: bp_pos,
-                                        mean_allele1_dosage: Some(mean_f32),
-                                        std_dev_allele1_dosage: Some(std_dev_f32),
-                                    })
-                                }
-                                Err(e_str) => {
-                                    warn!("SNP QC (idx {}): IoService actor reported error for SNP: {}", original_m_idx, e_str);
-                                    None
-                                }
+            // Receive and process the response for the current I/O chunk.
+            match response_rx.recv_timeout(io_service_infrastructure::DEFAULT_IO_OPERATION_TIMEOUT)
+            {
+                Ok(io_service_infrastructure::IoResponse::RawSnpChunkForQc {
+                    raw_genotypes_i8_chunk_result,
+                    original_m_indices_in_chunk, // These are the original BIM indices for the columns
+                }) => {
+                    match raw_genotypes_i8_chunk_result {
+                        Ok(genotypes_for_chunk_samples_x_snps) => {
+                            // genotypes_for_chunk_samples_x_snps is Array2<i8> (samples x SNPs_in_this_io_chunk)
+                            // Verify dimensions as a sanity check.
+                            if genotypes_for_chunk_samples_x_snps.ncols() != original_m_indices_in_chunk.len() {
+                                 warn!("SNP QC (I/O chunk {}): Received data for {} SNPs, but original_m_indices_in_chunk indicates {}. Mismatch, skipping this chunk.",
+                                       io_chunk_idx, genotypes_for_chunk_samples_x_snps.ncols(), original_m_indices_in_chunk.len());
+                                 continue; // Skip to the next I/O chunk
                             }
+                            if num_qc_samples > 0 && genotypes_for_chunk_samples_x_snps.nrows() != num_qc_samples {
+                                warn!("SNP QC (I/O chunk {}): Received data for {} samples, but expected {}. Mismatch, skipping this chunk.",
+                                       io_chunk_idx, genotypes_for_chunk_samples_x_snps.nrows(), num_qc_samples);
+                                 continue; // Skip to the next I/O chunk
+                            }
+
+                            let min_snp_call_rate_thresh = self.config.min_snp_call_rate_threshold;
+                            let min_snp_maf_thresh = self.config.min_snp_maf_threshold;
+                            let max_snp_hwe_p_thresh = self.config.max_snp_hwe_p_value_threshold;
+
+                            // Parallelize QC over SNPs within this fetched chunk using Rayon.
+                            let qc_results_for_this_io_chunk: Vec<IntermediateSnpDetails> =
+                                genotypes_for_chunk_samples_x_snps
+                                    .axis_iter(ndarray::Axis(1)) // Iterate over columns (each column is one SNP's data for all samples)
+                                    .into_par_iter() // Parallelize SNP processing with Rayon
+                                    .enumerate() // To get the column index within this specific chunk
+                                    .filter_map(|(col_idx_in_io_chunk, snp_column_data_arrayview1)| {
+                                        // snp_column_data_arrayview1 is an ArrayView1<i8> for the current SNP
+                                        let original_m_idx = original_m_indices_in_chunk[col_idx_in_io_chunk];
+
+                                        // --- Start of existing per-SNP QC logic (mostly unchanged, now operates on snp_column_data_arrayview1) ---
+                                        if num_qc_samples > 0 && snp_column_data_arrayview1.len() != num_qc_samples {
+                                            warn!("SNP QC (idx {}): Genotype array view length ({}) within chunk does not match num_qc_samples ({}). Skipping.",
+                                                  original_m_idx, snp_column_data_arrayview1.len(), num_qc_samples);
+                                            return None;
+                                        }
+
+                                        let valid_genotypes: Vec<i8> = snp_column_data_arrayview1
+                                            .iter()
+                                            .filter(|&&g| g != -127i8) // Filter out missing genotypes
+                                            .copied()
+                                            .collect();
+
+                                        let num_valid_genotypes_for_snp = valid_genotypes.len();
+
+                                        // Call Rate Check
+                                        if num_qc_samples > 0 { // Avoid division by zero if num_qc_samples is 0
+                                            let call_rate = num_valid_genotypes_for_snp as f64 / num_qc_samples as f64;
+                                            if call_rate < min_snp_call_rate_thresh {
+                                                debug!("SNP QC (idx {}): Failed call rate check. Call rate: {:.4}, Threshold: {:.4}. Valid genotypes: {}/{}. Skipping.",
+                                                       original_m_idx, call_rate, min_snp_call_rate_thresh, num_valid_genotypes_for_snp, num_qc_samples);
+                                                return None;
+                                            }
+                                        } else if num_valid_genotypes_for_snp > 0 {
+                                            // This case (no QC samples but SNP has valid genotypes) indicates an inconsistency.
+                                            warn!("SNP QC (idx {}): No QC samples (num_qc_samples is 0), but found {} valid genotypes. Skipping.", original_m_idx, num_valid_genotypes_for_snp);
+                                            return None;
+                                        }
+                                        // If num_qc_samples is 0 and num_valid_genotypes_for_snp is 0, it implicitly passes or is irrelevant.
+
+                                        // If no valid genotypes for this SNP among the QC'd samples, it cannot pass subsequent checks.
+                                        if num_valid_genotypes_for_snp == 0 {
+                                            debug!("SNP QC (idx {}): No valid genotypes found among QC'd samples. Skipping.", original_m_idx);
+                                            return None;
+                                        }
+
+                                        let mut allele1_dosage_sum_f64: f64 = 0.0;
+                                        let mut obs_hom_ref: usize = 0; let mut obs_het: usize = 0; let mut obs_hom_alt: usize = 0;
+
+                                        for &g_val_i8 in valid_genotypes.iter() {
+                                            allele1_dosage_sum_f64 += g_val_i8 as f64;
+                                            match g_val_i8 {
+                                                0 => obs_hom_ref += 1,
+                                                1 => obs_het += 1,
+                                                2 => obs_hom_alt += 1,
+                                                _ => { /* This case should not be reached for valid genotypes 0,1,2 */ }
+                                            }
+                                        }
+
+                                        // MAF Check (calculated based on valid genotypes only)
+                                        let total_alleles_obs_f64 = 2.0 * num_valid_genotypes_for_snp as f64;
+                                        // This check for total_alleles_obs_f64 < 1e-9 is redundant if num_valid_genotypes_for_snp == 0 is checked above.
+                                        // However, keeping it for robustness against potential floating point issues if num_valid_genotypes_for_snp is very small but non-zero.
+                                        if total_alleles_obs_f64 < 1e-9 {
+                                            debug!("SNP QC (idx {}): Total observed alleles from valid genotypes is effectively zero. Skipping MAF check.", original_m_idx);
+                                            return None;
+                                        }
+                                        let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64;
+                                        let maf = allele1_freq.min(1.0 - allele1_freq);
+
+                                        // Filter if monomorphic (allele1_freq is near 0 or 1) or MAF is below threshold.
+                                        if maf < min_snp_maf_thresh || allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
+                                            debug!("SNP QC (idx {}): Failed MAF check (MAF={:.4e}, threshold={:.4e} based on {} valid genotypes).", original_m_idx, maf, min_snp_maf_thresh, num_valid_genotypes_for_snp);
+                                            return None;
+                                        }
+
+                                        // HWE Check (only if threshold is less than 1.0, indicating HWE check is active)
+                                        if max_snp_hwe_p_thresh < 1.0 {
+                                            let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt);
+                                            if hwe_p_val <= max_snp_hwe_p_thresh {
+                                                debug!("SNP QC (idx {}): Failed HWE check (p-val={:.2e}, threshold={:.2e}).", original_m_idx, hwe_p_val, max_snp_hwe_p_thresh);
+                                                return None;
+                                            }
+                                        }
+
+                                        // Calculate mean and standard deviation based on valid genotypes.
+                                        let mean_f32 = (allele1_dosage_sum_f64 / num_valid_genotypes_for_snp as f64) as f32;
+                                        let sum_sq_diff_f64: f64 = valid_genotypes.iter()
+                                            .map(|&g_val| (g_val as f64 - mean_f32 as f64).powi(2)).sum();
+
+                                        let variance: f64;
+                                        // Variance calculation requires at least 2 valid observations.
+                                        if num_valid_genotypes_for_snp >= 2 {
+                                            variance = sum_sq_diff_f64 / (num_valid_genotypes_for_snp - 1) as f64;
+                                        } else {
+                                            // If 0 or 1 valid observation, variance is undefined or zero. Filter these out.
+                                            variance = 0.0;
+                                        }
+
+                                        // Filter out SNPs with zero or extremely low variance among valid genotypes.
+                                        if variance <= 1e-9 {
+                                            debug!("SNP QC (idx {}): Failed due to near-zero variance ({:.2e} based on {} valid genotypes).", original_m_idx, variance, num_valid_genotypes_for_snp);
+                                            return None;
+                                        }
+                                        let std_dev_f32 = (variance.sqrt()) as f32;
+                                        // --- End of existing per-SNP QC logic ---
+
+                                        // Fetch chromosome and bp_position using original_m_idx from the preparer's stored initial BIM data.
+                                        let chromosome = self.initial_bim_chromosomes[original_m_idx].clone();
+                                        let bp_pos = self.initial_bim_bp_positions[original_m_idx];
+
+                                        Some(IntermediateSnpDetails {
+                                            original_m_idx,
+                                            chromosome,
+                                            bp_position: bp_pos,
+                                            mean_allele1_dosage: Some(mean_f32),
+                                            std_dev_allele1_dosage: Some(std_dev_f32),
+                                        })
+                                    })
+                                    .collect();
+                            all_final_qc_snps_details.extend(qc_results_for_this_io_chunk);
                         }
-                        Ok(unexpected_response) => {
-                            warn!("SNP QC (idx {}): Received unexpected IoResponse type: {:?}. Expected RawSnpDataForQc.", original_m_idx, unexpected_response);
-                            None
-                        }
-                        Err(e_recv) => {
-                            warn!("SNP QC (idx {}): Failed to receive response from IoService actor (timeout or disconnect): {}", original_m_idx, e_recv);
-                            None
+                        Err(e_str) => {
+                            warn!(
+                                "SNP QC (I/O chunk {}): IoService actor reported error for SNP chunk: {}. Original indices in chunk: {:?}",
+                                io_chunk_idx, e_str, original_m_indices_in_chunk
+                            );
                         }
                     }
-                })
-                .collect();
+                }
+                Ok(unexpected_response) => {
+                    warn!(
+                        "SNP QC (I/O chunk {}): Received unexpected IoResponse type: {:?}. Expected RawSnpChunkForQc.",
+                        io_chunk_idx, unexpected_response
+                    );
+                }
+                Err(e_recv) => {
+                    warn!(
+                        "SNP QC (I/O chunk {}): Failed to receive response from IoService actor (timeout or disconnect): {}",
+                        io_chunk_idx, e_recv
+                    );
+                }
+            }
 
             debug!(
-                "Batch {}: Processed {} responses, got {} QC-passing SNPs.",
-                batch_idx,
-                num_pending_responses_in_batch_for_debug,
-                batch_qc_results.len()
+                "I/O Chunk {}: Processed response. Total QC'd SNPs so far: {}.",
+                io_chunk_idx,
+                all_final_qc_snps_details.len()
             );
-            all_final_qc_snps_details.extend(batch_qc_results);
+            // This logging is useful for tracking progress.
             info!(
-                "SNP QC Progress: After batch {}/{}, total QC'd SNPs found: {}",
-                batch_idx + 1,
+                "SNP QC Progress: After I/O chunk {}/{}, total QC'd SNPs found: {}",
+                io_chunk_idx + 1, // User-friendly 1-based indexing for progress
+                num_io_chunks,
+                all_final_qc_snps_details.len()
+            );
+        }
+
+        let num_final_qc_snps = all_final_qc_snps_details.len();
                 num_batches,
                 all_final_qc_snps_details.len()
             );
