@@ -7,6 +7,8 @@ from sklearn.metrics import silhouette_score
 from sklearn.feature_selection import mutual_info_classif
 from scipy.spatial.distance import jensenshannon, cdist
 
+# e.g.: python3 metrics.py --pca_file chr22_subset25/chr22_eigensnp.eigensnp.pca.tsv --sample_file igsr_samples.tsv
+
 # Helper function for JSD calculation using histograms per PC
 def calculate_pairwise_jsd_histograms(pc_data_A, pc_data_B, n_pcs=10, num_bins=30):
     jsd_for_pair_across_pcs = []
