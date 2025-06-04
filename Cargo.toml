@@ -25,7 +25,7 @@ documentation = "https://github.com/SauersML/genomic_pca"
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
-efficient_pca = { git = "https://github.com/SauersML/efficient_pca.git", branch = "main", features = ["enable-eigensnp-diagnostics"] }
+efficient_pca = { git = "https://github.com/SauersML/efficient_pca.git", branch = "main", default-features = false }
 env_logger = "0.11.8"
 flume = { version = "0.11.1", features = ["select"] }
 indicatif = "0.17.11"
@@ -46,8 +46,21 @@ ndarray-linalg = { version = "0.17.0", default-features = false, features = ["op
 thiserror = "2.0.12"
 
 [features]
-default = []
+default = ["backend-openblas"]
+
+# Backend options (mutually exclusive)
+backend-openblas = ["efficient_pca/backend_openblas"]
+backend-mkl = ["efficient_pca/backend_mkl"]
+backend-faer = ["efficient_pca/backend_faer"]
+
+# Other features
+jemalloc = ["efficient_pca/jemalloc"]
 eigensnp-diagnostics = ["efficient_pca/enable-eigensnp-diagnostics", "dep:serde_json"]
+
+# Convenience combinations: all features with different backends
+all-openblas = ["backend-openblas", "jemalloc", "eigensnp-diagnostics"]
+all-mkl = ["backend-mkl", "jemalloc", "eigensnp-diagnostics"]
+all-faer = ["backend-faer", "jemalloc", "eigensnp-diagnostics"]
 
 [profile.release]
 lto = true
