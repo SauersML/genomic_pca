@@ -6,6 +6,9 @@ QC order:
   2. MAF         ≥ --min-maf
   3. HWE p-value > --max-hwe-p      (skip if 1)
   4. variance    > --min-variance-epsilon
+
+Example:
+python3 pca.py   --bed-prefix  ./chr22_hg38_plink1   --out-dir     ./chr22_hg38_safe_pca   --k-components 10   --variant-chunk 2000   --min-call-rate 0.98   --min-maf 0.01   --max-hwe-p 1e-6
 """
 
 from pathlib import Path
