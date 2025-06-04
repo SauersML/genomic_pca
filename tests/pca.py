@@ -117,10 +117,21 @@ def main() -> None:
         sys.exit(1)
 
     gram /= kept
-    log.info(f"GRM built from {kept:,} variants in {(time.time()-t0)/60:.1f} min")
+    data_loading_time = time.time() - t0
+    log.info(f"GRM built from {kept:,} variants in {data_loading_time/60:.1f} min")
 
+    # ═══════════════════════════════════════════════════════════════
+    # TIME THE PCA STEP ITSELF (eigendecomposition)
+    # ═══════════════════════════════════════════════════════════════
+    log.info("Starting PCA eigendecomposition...")
+    pca_start = time.time()
+    
     # Exact eigen-decomposition → top-k PCs
     evals_all, evecs_all = eigh(gram)   # ascending
+    
+    pca_time = time.time() - pca_start
+    log.info(f"PCA eigendecomposition completed in {pca_time:.3f} seconds ({pca_time/60:.2f} minutes)")
+    
     k      = min(args.k_components, n_samples - 1)
     evals  = evals_all[-k:][::-1]
     evecs  = evecs_all[:, -k:][:, ::-1]
@@ -140,14 +151,18 @@ def main() -> None:
                 index=False, float_format="%.6g")
 
     # ─── summary ───
+    total_time = time.time() - t0
     print("\n===== PCA COMPLETE =====")
     print(f"  QC-passed variants : {kept:,} / {n_variants:,}")
     for i, ev in enumerate(evals, 1):
         print(f"  PC{i:<2} eigenvalue : {ev:.6g}")
+    print(f"\nTiming breakdown:")
+    print(f"  Data loading + GRM : {data_loading_time:.1f} seconds ({data_loading_time/60:.2f} minutes)")
+    print(f"  PCA eigendecomp    : {pca_time:.1f} seconds ({pca_time/60:.2f} minutes)")
+    print(f"  Total wall-time    : {total_time:.1f} seconds ({total_time/60:.2f} minutes)")
     print(f"\nResults written to directory: {out_dir}\n"
           f"  • pca.tsv          (scores × {k})\n"
           f"  • py.eigenvalues.tsv  (λ₁…λ{k})")
-    log.info(f"Total wall-time: {(time.time()-t0)/60:.1f} min")
 
 if __name__ == '__main__':
     try:
