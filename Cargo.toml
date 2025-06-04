@@ -46,9 +46,7 @@ ndarray-linalg = { version = "0.17.0", default-features = false }
 thiserror = "2.0.12"
 
 [features]
-# Default build: genomic_pca uses ndarray-linalg with OpenBLAS,
-# and efficient_pca uses its ndarray-linalg based OpenBLAS strategy.
-default = ["openblas-openblas"]
+default = [] # must choose
 
 # Format: [ndarray-linalg backend for genomic_pca]-[efficient_pca strategy]
 
