@@ -232,9 +232,12 @@ if __name__ == "__main__":
 
     summary_file_path = BASE_OUTPUT_DIR / "sweeps_summary.tsv"
     try:
-        with open(summary_file_path, 'w', newline='', encoding='utf-8') as f_tsv:
+        file_exists = summary_file_path.exists()
+        with open(summary_file_path, 'a', newline='', encoding='utf-8') as f_tsv:
             writer = csv.DictWriter(f_tsv, fieldnames=tsv_columns, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
-            writer.writeheader()
+            if not file_exists:
+                # Write header only once when file is first created
+                writer.writeheader()
             for res_dict in results_data:
                 # Ensure all keys are present, provide default if not (though they should be)
                 row_to_write = {key: res_dict.get(key, "") for key in tsv_columns}
