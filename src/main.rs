@@ -24,6 +24,16 @@ use std::{
 };
 use libc; // Added for getrlimit
 
+#![cfg_attr(
+    not(any(
+        feature = "openblas-openblas",
+        feature = "openblas-faer",
+        feature = "mkl-mkl",
+        feature = "mkl-faer"
+    )),
+    compile_error!("ERROR: no BLAS/LAPACK backend was selected for genomic_pca. You must build with exactly one of the features enabled.")
+)]
+
 // --- Helper Function to Query Soft Resource Limits ---
 fn get_rlimit_soft(resource: libc::c_uint) -> Result<usize, std::io::Error> {
     let mut rlim = libc::rlimit {
