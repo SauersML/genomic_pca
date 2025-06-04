@@ -42,25 +42,28 @@ rand = "0.9.1"
 rand_chacha = "0.9.0"
 rand_distr = "0.5.1"
 serde_json = { version = "1.0.140", optional = true }
-ndarray-linalg = { version = "0.17.0", default-features = false, features = ["openblas-static"] }
+ndarray-linalg = { version = "0.17.0", default-features = false }
 thiserror = "2.0.12"
 
 [features]
-default = ["backend-openblas"]
+default = ["openblas-openblas"]
 
-# Backend options (mutually exclusive)
-backend-openblas = ["efficient_pca/backend_openblas"]
-backend-mkl = ["efficient_pca/backend_mkl"]
-backend-faer = ["efficient_pca/backend_faer"]
+# Format: [genomic_pca backend]-[efficient_pca backend]
 
-# Other features
+# 1. OpenBLAS + OpenBLAS
+openblas-openblas = ["ndarray-linalg/openblas-static", "efficient_pca/backend_openblas"]
+
+# 2. OpenBLAS + Faer (genomic uses OpenBLAS, efficient uses Faer)
+openblas-faer = ["ndarray-linalg/openblas-static", "efficient_pca/backend_faer"]
+
+# 4. MKL + MKL
+mkl-mkl = ["ndarray-linalg/intel-mkl-static", "efficient_pca/backend_mkl"]
+
+# 5. MKL + Faer (genomic uses Intel MKL, efficient uses Faer)
+mkl-faer = ["ndarray-linalg/intel-mkl-static", "efficient_pca/backend_faer"]
+
 jemalloc = ["efficient_pca/jemalloc"]
 eigensnp-diagnostics = ["efficient_pca/enable-eigensnp-diagnostics", "dep:serde_json"]
-
-# Convenience combinations: all features with different backends
-all-openblas = ["backend-openblas", "jemalloc", "eigensnp-diagnostics"]
-all-mkl = ["backend-mkl", "jemalloc", "eigensnp-diagnostics"]
-all-faer = ["backend-faer", "jemalloc", "eigensnp-diagnostics"]
 
 [profile.release]
 lto = true
