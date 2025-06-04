@@ -4,7 +4,7 @@
 use anyhow::{anyhow, Result};
 use log::{debug, warn};
 use ndarray::{Array2};
-use noodles_vcf::{Record as VcfRecord, Header as VcfHeader}; // Changed
+use noodles_vcf::{Record as VcfRecord, Header as VcfHeader};
 use std::{
     path::Path,
     sync::Arc,
