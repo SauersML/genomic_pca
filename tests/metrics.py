@@ -160,7 +160,7 @@ def best_hdbscan_adjusted_mutual_information(
             )
             best_ami = max(best_ami, ami_value)
 
-  return float(best_ami)  # could be 0.0 if no real clustering emerged
+    return float(best_ami)  # could be 0.0 if no real clustering emerged
 
 
 def logistic_regression_balanced_accuracy(
