@@ -274,8 +274,6 @@ pub mod vcf_processing {
 
             chromosome_variants_data.push(VariantGenotypeData {
                 id: variant_id,
-                chromosome: chrom_str,
-                position: pos_val,
                 numerical_genotypes: temp_genotypes_for_variant,
             });
         }
