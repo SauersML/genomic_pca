@@ -33,7 +33,7 @@ METRICS_PCS_TO_USE = 10
 METRICS_MC_SAMPLES_KDE = 4000 # Default for metrics.py
 
 METRIC_COLUMNS_TO_ANALYZE = [
-    "Mutual_information_nats",
+    "LogReg_Balanced_Accuracy_CV",
     "Mean_multivariate_Jensen_Shannon_divergence_nats",
     "Average_silhouette",
     "Mean_contrastive_violation",
@@ -41,7 +41,7 @@ METRIC_COLUMNS_TO_ANALYZE = [
 ]
 
 METRIC_PROPERTIES = {
-    "Mutual_information_nats": {"higher_is_better": True, "name": "Mutual Information (nats)"},
+    "LogReg_Balanced_Accuracy_CV": {"higher_is_better": True, "name": "LogReg Balanced Accuracy (CV)"},
     "Mean_multivariate_Jensen_Shannon_divergence_nats": {"higher_is_better": True, "name": "Mean JSD (nats)"},
     "Average_silhouette": {"higher_is_better": True, "name": "Avg. Silhouette"},
     "Mean_contrastive_violation": {"higher_is_better": False, "name": "Mean Contrastive Violation"},
