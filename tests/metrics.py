@@ -1,220 +1,336 @@
-import pandas as pd
-import numpy as np
+"""
+e.g.:
+python3 metrics.py --pca_file chr22_subset25/chr22_eigensnp.eigensnp.pca.tsv --sample_file igsr_samples.tsv
+
+Outputs one TSV (default population_metrics_summary.tsv) with columns:
+
+  Superpopulation
+  Number_of_samples
+  Number_of_subpopulations
+  Mutual_information_nats
+  Mean_multivariate_Jensen_Shannon_divergence_nats
+  Median_multivariate_Jensen_Shannon_divergence_nats
+  Average_silhouette
+  Median_silhouette
+  Mean_contrastive_violation
+  Median_contrastive_violation
+  HDBSCAN_adjusted_mutual_information
+"""
+
+from __future__ import annotations
 import argparse
-import os
-import sys # For sys.exit()
-from sklearn.metrics import silhouette_score
-from sklearn.feature_selection import mutual_info_classif
-from scipy.spatial.distance import jensenshannon, cdist
+import sys
+import warnings
+from typing import Dict, List, Tuple
 
-# e.g.: python3 metrics.py --pca_file chr22_subset25/chr22_eigensnp.eigensnp.pca.tsv --sample_file igsr_samples.tsv
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import cdist
+from sklearn.metrics import silhouette_samples, adjusted_mutual_info_score
+from sklearn.neighbors import KernelDensity
+from sklearn.preprocessing import StandardScaler
+import hdbscan
 
-# Helper function for JSD calculation using histograms per PC
-def calculate_pairwise_jsd_histograms(pc_data_A, pc_data_B, n_pcs=10, num_bins=30):
-    jsd_for_pair_across_pcs = []
-    if pc_data_A.shape[0] == 0 or pc_data_B.shape[0] == 0:
-        return np.nan
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 
-    for j in range(n_pcs):
-        pc_A_dim_j = pc_data_A[:, j]
-        pc_B_dim_j = pc_data_B[:, j]
 
-        if len(pc_A_dim_j) == 0 or len(pc_B_dim_j) == 0:
-            jsd_for_pair_across_pcs.append(np.nan)
-            continue
-
-        combined_data = np.concatenate((pc_A_dim_j, pc_B_dim_j))
-        if len(np.unique(combined_data)) < 2:
-            jsd_for_pair_across_pcs.append(0.0)
-            continue
-        
-        min_val = np.min(combined_data)
-        max_val = np.max(combined_data)
-        
-        if min_val >= max_val: # Ensure range for bins
-            if min_val == max_val: # All values identical
-                 jsd_for_pair_across_pcs.append(0.0)
-                 continue
-            max_val = min_val + 1e-6 # Create a tiny range if they were almost identical before unique check
-        
-        bins = np.linspace(min_val, max_val, num_bins + 1)
-        hist_A, _ = np.histogram(pc_A_dim_j, bins=bins, density=False)
-        hist_B, _ = np.histogram(pc_B_dim_j, bins=bins, density=False)
-        
-        # scipy.spatial.distance.jensenshannon normalizes p and q if they don't sum to 1.
-        js_distance = jensenshannon(hist_A, hist_B, base=np.e)  # sqrt(JSD) in nats
-        jsd_val = js_distance**2 # JSD in nats
-        jsd_for_pair_across_pcs.append(jsd_val)
-
-    if not jsd_for_pair_across_pcs or np.all(np.isnan(jsd_for_pair_across_pcs)):
-        return np.nan
-    return np.nanmean(jsd_for_pair_across_pcs)
-
-def calculate_metrics_per_superpopulation(pca_file, sample_file, num_pcs_to_use=10):
-    # --- 1. Data Loading ---
-    # No try-except: script will fail if files not found or unreadable
-    pca_df = pd.read_csv(pca_file, sep=r'\s+') # Use raw string for regex
-    sample_df = pd.read_csv(sample_file, sep='\t') # Assuming igsr_samples.tsv is typically tab-separated
-
-    # --- 2. Data Validation and Merging ---
-    if 'SampleID' not in pca_df.columns:
-        print(f"Error: 'SampleID' column not found in PCA file '{pca_file}'. Columns found: {pca_df.columns.tolist()}", file=sys.stderr)
-        sys.exit(1)
-    
-    sample_id_col_sample_info = 'Sample name' 
-    pop_col_sample_info = 'Population code'
-    superpop_col_sample_info = 'Superpopulation code'
-
-    if sample_id_col_sample_info not in sample_df.columns:
-        print(f"Error: '{sample_id_col_sample_info}' column not in sample info file '{sample_file}'. Columns: {sample_df.columns.tolist()}", file=sys.stderr)
-        sys.exit(1)
-    if pop_col_sample_info not in sample_df.columns:
-        print(f"Error: '{pop_col_sample_info}' column not in sample info file '{sample_file}'. Columns: {sample_df.columns.tolist()}", file=sys.stderr)
-        sys.exit(1)
-    if superpop_col_sample_info not in sample_df.columns:
-        print(f"Error: '{superpop_col_sample_info}' column not in sample info file '{sample_file}'. Columns: {sample_df.columns.tolist()}", file=sys.stderr)
-        sys.exit(1)
-
-    pc_cols = [f'PC{i+1}' for i in range(num_pcs_to_use)]
-    missing_pc_cols = [col for col in pc_cols if col not in pca_df.columns]
-    if missing_pc_cols:
-        print(f"Error: Missing expected PC columns in PCA file: {missing_pc_cols}.", file=sys.stderr)
-        print(f"Ensure --num_pcs ({num_pcs_to_use}) matches available PCs. Available: {pca_df.columns.tolist()}", file=sys.stderr)
-        sys.exit(1)
-    
-    sample_df_subset = sample_df[[sample_id_col_sample_info, pop_col_sample_info, superpop_col_sample_info]].copy()
-    merged_df = pd.merge(pca_df, sample_df_subset, left_on='SampleID', right_on=sample_id_col_sample_info, how='inner')
-
-    if merged_df.empty:
-        print("Error: Merging PCA data and sample info resulted in an empty DataFrame. Check sample IDs and file integrity.", file=sys.stderr)
-        sys.exit(1)
-        
-    superpopulations = merged_df[superpop_col_sample_info].unique()
-    print(f"Found {len(superpopulations)} superpopulations: {sorted(superpopulations)}\n") # Print sorted list
-
-    # --- 3. Main Loop per Superpopulation ---
-    for superpop_code in sorted(superpopulations):
-        print(f"--- Processing Superpopulation: {superpop_code} ---")
-        current_superpop_df = merged_df[merged_df[superpop_col_sample_info] == superpop_code].copy()
-        
-        if current_superpop_df.shape[0] < 2:
-            print("  Skipping: Less than 2 samples in this superpopulation.\n")
-            continue
-
-        pc_data_current = current_superpop_df[pc_cols].values
-        subpop_labels_current_str = current_superpop_df[pop_col_sample_info]
-        unique_subpops_in_superpop, counts_subpops = np.unique(subpop_labels_current_str, return_counts=True)
-        num_unique_subpops = len(unique_subpops_in_superpop)
-
-        print(f"  Number of samples: {current_superpop_df.shape[0]}")
-        print(f"  Number of unique subpopulations: {num_unique_subpops}")
-        if num_unique_subpops > 0:
-             print(f"  Subpopulations (counts): {dict(zip(unique_subpops_in_superpop, counts_subpops))}")
-
-        # --- Metric Calculations ---
-        subpop_labels_numerical = pd.factorize(subpop_labels_current_str)[0]
-
-        # 1. Mutual Information (MI)
-        if current_superpop_df.shape[0] > 1 and num_unique_subpops > 1:
-            # sklearn's mutual_info_classif handles small n_samples internally for n_neighbors
-            mi_scores_per_pc = mutual_info_classif(pc_data_current, subpop_labels_numerical,
-                                                   discrete_features=False, random_state=42)
-            print(f"  Mutual Information (MI) for first 3 PCs (and PC{num_pcs_to_use} if different):")
-            for i in range(min(3, num_pcs_to_use)):
-                print(f"    MI PC{i+1}: {mi_scores_per_pc[i]:.4f}")
-            if num_pcs_to_use > 3: # Print the last PC's MI if not already printed
-                 print(f"    MI PC{num_pcs_to_use}: {mi_scores_per_pc[num_pcs_to_use-1]:.4f}")
-            print(f"  Average MI across all {num_pcs_to_use} PCs: {np.mean(mi_scores_per_pc):.4f}")
-        else:
-            print("  Mutual Information: Not applicable (requires >1 sample and >1 distinct subpopulation).")
-
-        # 2. Average Pairwise Jensen-Shannon Divergence (JSD)
-        if num_unique_subpops >= 2:
-            pairwise_jsd_values = []
-            for i in range(num_unique_subpops):
-                for k in range(i + 1, num_unique_subpops):
-                    subpop_A_name = unique_subpops_in_superpop[i]
-                    subpop_B_name = unique_subpops_in_superpop[k]
-                    pc_data_A = current_superpop_df[current_superpop_df[pop_col_sample_info] == subpop_A_name][pc_cols].values
-                    pc_data_B = current_superpop_df[current_superpop_df[pop_col_sample_info] == subpop_B_name][pc_cols].values
-                    if pc_data_A.shape[0] > 0 and pc_data_B.shape[0] > 0:
-                        jsd_ab = calculate_pairwise_jsd_histograms(pc_data_A, pc_data_B, n_pcs=num_pcs_to_use)
-                        if not np.isnan(jsd_ab):
-                             pairwise_jsd_values.append(jsd_ab)
-            if pairwise_jsd_values:
-                avg_jsd = np.nanmean(pairwise_jsd_values)
-                print(f"  Average Pairwise JSD: {avg_jsd:.4f}")
-            else:
-                print("  Average Pairwise JSD: Not enough valid pairs or data for calculation.")
-        else:
-            print("  Average Pairwise JSD: Not applicable (requires at least 2 subpopulations).")
-
-        # 3. Silhouette Score
-        if num_unique_subpops >= 2 and current_superpop_df.shape[0] > num_unique_subpops:
-            # silhouette_score will raise ValueError if conditions not met (e.g. n_labels < 2 or n_labels > n_samples-1)
-            # This will now halt the script if it occurs, as per "no try-except"
-            sil_score = silhouette_score(pc_data_current, subpop_labels_current_str)
-            print(f"  Silhouette Score: {sil_score:.4f}")
-        else:
-            print(f"  Silhouette Score: Not applicable (needs >=2 distinct subpopulations and more samples than unique subpop labels).")
-            
-        # 4. Contrastive Score (Revised, No Arbitrary Margin)
-        if num_unique_subpops >= 2:
-            violations = []
-            for i in range(current_superpop_df.shape[0]):
-                sample_pc_vector = pc_data_current[i, :].reshape(1, -1)
-                current_sample_subpop_label = subpop_labels_current_str.iloc[i]
-                same_subpop_mask = (subpop_labels_current_str == current_sample_subpop_label).values
-                # Exclude the sample itself from its own group for D_intra calculation
-                temp_self_mask = np.zeros(current_superpop_df.shape[0], dtype=bool)
-                temp_self_mask[i] = True
-                same_subpop_mask_others = same_subpop_mask & ~temp_self_mask
-
-                pcs_own_subpop = pc_data_current[same_subpop_mask_others, :]
-                d_intra = np.mean(cdist(sample_pc_vector, pcs_own_subpop)) if pcs_own_subpop.shape[0] > 0 else 0.0
-
-                other_subpop_mask = (subpop_labels_current_str != current_sample_subpop_label).values
-                pcs_other_subpops = pc_data_current[other_subpop_mask, :]
-                d_inter_min = np.min(cdist(sample_pc_vector, pcs_other_subpops)) if pcs_other_subpops.shape[0] > 0 else np.inf
-                
-                violation = max(0, d_intra - d_inter_min) if d_inter_min != np.inf else 0.0
-                violations.append(violation)
-            
-            avg_contrastive_score = np.mean(violations) if violations else 0.0
-            print(f"  Contrastive Score (avg V_i): {avg_contrastive_score:.4f}")
-        else:
-            print("  Contrastive Score: Not applicable (requires at least 2 subpopulations).")
-        print("--- End Superpopulation ---\n")
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Calculate population structure metrics per superpopulation based on PCs and subpopulation labels.",
-        formatter_class=argparse.RawTextHelpFormatter
+# ────────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ────────────────────────────────────────────────────────────────────────────────
+def fit_gaussian_kdes(
+    data_matrix: np.ndarray,
+    discrete_labels: np.ndarray,
+    bandwidth_rule: str | float = "scott",
+) -> Tuple[Dict[str, KernelDensity], KernelDensity]:
+    """Fit a Gaussian KDE for each discrete label plus a pooled KDE."""
+    kde_per_label: Dict[str, KernelDensity] = {}
+    for label in np.unique(discrete_labels):
+        kde = KernelDensity(kernel="gaussian", bandwidth=bandwidth_rule)
+        kde.fit(data_matrix[discrete_labels == label])
+        kde_per_label[label] = kde
+    pooled_kde = KernelDensity(kernel="gaussian", bandwidth=bandwidth_rule).fit(
+        data_matrix
     )
-    parser.add_argument('--pca_file', type=str, help="Path to the PCA eigenvectors file (e.g., 'pca.tsv').")
-    parser.add_argument('--sample_file', type=str, help="Path to sample information (e.g., 'samples.tsv').")
-    parser.add_argument('--num_pcs', type=int, default=10, help="Number of PCs to use (default: 10).")
+    return kde_per_label, pooled_kde
+
+
+def monte_carlo_mutual_information(
+    kde_per_label: Dict[str, KernelDensity],
+    pooled_kde: KernelDensity,
+    class_priors: Dict[str, float],
+    samples_per_label: int = 4_000,
+    master_seed: int = 1234,
+) -> float:
+    """Plug-in Monte-Carlo estimate of I(PCs ; label) in *nats*."""
+    mutual_information = 0.0
+    for serial, (label, prior) in enumerate(class_priors.items()):
+        seed = (master_seed + 7919 * serial) & 0xFFFFFFFF
+        synthetic_points = kde_per_label[label].sample(
+            samples_per_label, random_state=seed
+        )
+        log_density_label = kde_per_label[label].score_samples(synthetic_points)
+        log_density_pool = pooled_kde.score_samples(synthetic_points)
+        mutual_information += prior * np.mean(log_density_label - log_density_pool)
+    return float(mutual_information)
+
+
+def monte_carlo_jsd(
+    kde_a: KernelDensity,
+    kde_b: KernelDensity,
+    mc_samples: int = 4_000,
+    seed: int = 42,
+) -> float:
+    """Monte-Carlo Jensen–Shannon divergence (nats) between two multivariate KDEs."""
+    half = mc_samples // 2
+    sample_a = kde_a.sample(half, random_state=seed & 0xFFFFFFFF)
+    sample_b = kde_b.sample(mc_samples - half, random_state=(seed + 1) & 0xFFFFFFFF)
+    all_samples = np.vstack([sample_a, sample_b])
+
+    log_p_a = kde_a.score_samples(all_samples)
+    log_p_b = kde_b.score_samples(all_samples)
+    log_mix = np.logaddexp(log_p_a, log_p_b) - np.log(2.0)
+
+    return float(0.5 * np.mean(log_p_a - log_mix) + 0.5 * np.mean(log_p_b - log_mix))
+
+
+def contrastive_violation_statistics(
+    data_matrix: np.ndarray, discrete_labels: np.ndarray
+) -> Tuple[float, float]:
+    """
+    For every sample:
+      violation = max(0,
+                      mean_distance_to_own_subpop − min_distance_to_any_other_subpop)
+    """
+    distance_matrix = cdist(data_matrix, data_matrix, metric="euclidean")
+    violations: List[float] = []
+
+    for idx in range(data_matrix.shape[0]):
+        same_mask = discrete_labels == discrete_labels[idx]
+        same_mask[idx] = False  # exclude self
+        intra_distance = distance_matrix[idx, same_mask].mean() if same_mask.any() else 0.0
+
+        other_mask = ~same_mask
+        inter_min_distance = (
+            distance_matrix[idx, other_mask].min() if other_mask.any() else np.inf
+        )
+        violations.append(max(0.0, intra_distance - inter_min_distance)
+                          if np.isfinite(inter_min_distance) else 0.0)
+
+    violations = np.asarray(violations)
+    return float(violations.mean()), float(np.median(violations))
+
+
+def best_hdbscan_adjusted_mutual_information(
+    data_matrix: np.ndarray,
+    true_labels: np.ndarray,
+    search_fracs: Tuple[float, ...] = (0.02, 0.04, 0.06, 0.08, 0.10, 0.15),
+) -> float:
+    """
+    Try several (min_cluster_size, min_samples) pairs and return the highest
+    Adjusted MI between HDBSCAN clusters and true subpopulation labels.
+    If no parameter set yields ≥2 clusters, return 0.0.
+    """
+    n = len(true_labels)
+    best_ami = 0.0  # never NaN
+
+    for frac in search_fracs:
+        min_cluster_size = max(2, int(round(frac * n)))
+        # heuristic: examine three min_samples values
+        for min_samples in {1, min_cluster_size // 2, min_cluster_size}:
+            clusterer = hdbscan.HDBSCAN(
+                min_cluster_size=min_cluster_size,
+                min_samples=min_samples,
+                metric="euclidean",
+                cluster_selection_method="leaf",
+            )
+            predicted_labels = clusterer.fit_predict(data_matrix)
+
+            # Ignore noise points (-1) for AMI
+            core_mask = predicted_labels != -1
+            if core_mask.sum() < 2:
+                continue  # too few points left
+            core_predicted = predicted_labels[core_mask]
+            core_true = true_labels[core_mask]
+            if len(np.unique(core_predicted)) < 2:
+                continue  # fewer than 2 clusters => AMI undefined/0
+
+            ami_value = adjusted_mutual_info_score(
+                core_true, core_predicted, average_method="arithmetic"
+            )
+            best_ami = max(best_ami, ami_value)
+
+    return float(best_ami)  # could be 0.0 if no real clustering emerged
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Core routine
+# ────────────────────────────────────────────────────────────────────────────────
+def compute_metrics_for_superpopulations(
+    pca_file_path: str,
+    sample_file_path: str,
+    number_of_pcs: int,
+    monte_carlo_samples: int,
+    output_tsv_path: str,
+) -> None:
+    # 1 ─── Load and join PCA with sample metadata
+    pca_table = pd.read_csv(pca_file_path, sep=r"\s+")
+    sample_table = pd.read_csv(sample_file_path, sep="\t")
+
+    required_pca_columns = ["SampleID"] + [f"PC{i+1}" for i in range(number_of_pcs)]
+    required_sample_columns = ["Sample name", "Population code", "Superpopulation code"]
+
+    for col in required_pca_columns:
+        if col not in pca_table.columns:
+            sys.exit(f"Column '{col}' missing in PCA file.")
+    for col in required_sample_columns:
+        if col not in sample_table.columns:
+            sys.exit(f"Column '{col}' missing in sample file.")
+
+    merged = pca_table.merge(
+        sample_table[required_sample_columns],
+        left_on="SampleID",
+        right_on="Sample name",
+        how="inner",
+    )
+    if merged.empty:
+        sys.exit("No overlapping Sample IDs between PCA and sample tables.")
+
+    pc_columns = [f"PC{i+1}" for i in range(number_of_pcs)]
+    merged[pc_columns] = StandardScaler().fit_transform(merged[pc_columns])
+
+    # TSV header
+    column_names = [
+        "Superpopulation",
+        "Number_of_samples",
+        "Number_of_subpopulations",
+        "Mutual_information_nats",
+        "Mean_multivariate_Jensen_Shannon_divergence_nats",
+        "Median_multivariate_Jensen_Shannon_divergence_nats",
+        "Average_silhouette",
+        "Median_silhouette",
+        "Mean_contrastive_violation",
+        "Median_contrastive_violation",
+        "HDBSCAN_adjusted_mutual_information",
+    ]
+    tsv_lines: List[str] = ["\t".join(column_names)]
+
+    # 2 ─── Iterate over super-populations
+    for superpopulation_code in sorted(merged["Superpopulation code"].unique()):
+        subset = merged[merged["Superpopulation code"] == superpopulation_code]
+        pc_matrix = subset[pc_columns].to_numpy()
+        subpopulation_labels = subset["Population code"].to_numpy()
+
+        # KDEs for MI & JSD
+        kde_dict, pooled_kde = fit_gaussian_kdes(pc_matrix, subpopulation_labels)
+
+        # Mutual information
+        unique_subpops, counts = np.unique(subpopulation_labels, return_counts=True)
+        class_priors = {
+            label: cnt / len(subset) for label, cnt in zip(unique_subpops, counts)
+        }
+        mutual_information_nats = monte_carlo_mutual_information(
+            kde_dict, pooled_kde, class_priors, samples_per_label=monte_carlo_samples
+        )
+
+        # Pairwise JSDs
+        jsd_values: List[float] = []
+        for i, label_a in enumerate(unique_subpops):
+            for label_b in unique_subpops[i + 1 :]:
+                jsd_values.append(
+                    monte_carlo_jsd(
+                        kde_dict[label_a],
+                        kde_dict[label_b],
+                        mc_samples=monte_carlo_samples,
+                        seed=17 + len(jsd_values),
+                    )
+                )
+        mean_jsd = float(np.mean(jsd_values)) if jsd_values else np.nan
+        median_jsd = float(np.median(jsd_values)) if jsd_values else np.nan
+
+        # Silhouette statistics
+        silhouette_values = silhouette_samples(pc_matrix, subpopulation_labels)
+        average_silhouette = float(silhouette_values.mean())
+        median_silhouette = float(np.median(silhouette_values))
+
+        # Contrastive violation statistics
+        mean_contrastive, median_contrastive = contrastive_violation_statistics(
+            pc_matrix, subpopulation_labels
+        )
+
+        # Adaptive HDBSCAN AMI
+        hdbscan_ami = best_hdbscan_adjusted_mutual_information(
+            pc_matrix, subpopulation_labels
+        )
+
+        # TSV row
+        tsv_lines.append(
+            "\t".join(
+                map(
+                    str,
+                    [
+                        superpopulation_code,
+                        len(subset),
+                        len(unique_subpops),
+                        f"{mutual_information_nats:.6f}",
+                        f"{mean_jsd:.6f}",
+                        f"{median_jsd:.6f}",
+                        f"{average_silhouette:.6f}",
+                        f"{median_silhouette:.6f}",
+                        f"{mean_contrastive:.6f}",
+                        f"{median_contrastive:.6f}",
+                        f"{hdbscan_ami:.6f}",
+                    ],
+                )
+            )
+        )
+
+    # 3 ─── Write TSV
+    with open(output_tsv_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(tsv_lines))
+    print(
+        f"✔ Finished: wrote {len(tsv_lines) - 1} rows to {output_tsv_path}",
+        flush=True,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# CLI
+# ────────────────────────────────────────────────────────────────────────────────
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Compute multivariate population-structure metrics "
+        "for each super-population.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--pca_file", required=True, help="Path to PCA TSV file.")
+    parser.add_argument("--sample_file", required=True, help="Path to sample TSV file.")
+    parser.add_argument(
+        "--number_of_pcs", type=int, default=10, help="Number of PCs (columns) to use."
+    )
+    parser.add_argument(
+        "--mc_samples",
+        type=int,
+        default=4_000,
+        help="Monte-Carlo samples per KDE for MI and JSD estimates.",
+    )
+    parser.add_argument(
+        "--output_tsv",
+        default="population_metrics_summary.tsv",
+        help="Destination TSV file.",
+    )
     args = parser.parse_args()
 
-    pca_f, sample_f = args.pca_file, args.sample_file
-    # Auto-find files logic (simplified, prefers specified path)
-    if not pca_f and os.path.exists("chr22_eigensnp.eigensnp.pca.tsv"): pca_f = "chr22_eigensnp.eigensnp.pca.tsv"
-    if not sample_f and os.path.exists("igsr_samples.tsv"): sample_f = "igsr_samples.tsv"
+    compute_metrics_for_superpopulations(
+        pca_file_path=args.pca_file,
+        sample_file_path=args.sample_file,
+        number_of_pcs=args.number_of_pcs,
+        monte_carlo_samples=args.mc_samples,
+        output_tsv_path=args.output_tsv,
+    )
 
-    if not pca_f or not os.path.exists(pca_f):
-        print(f"Error: PCA file '{pca_f or 'Default PCA file'}' not found or not specified.", file=sys.stderr)
-        parser.print_help()
-        sys.exit(1)
-    if not sample_f or not os.path.exists(sample_f):
-        print(f"Error: Sample info file '{sample_f or 'Default sample file'}' not found or not specified.", file=sys.stderr)
-        parser.print_help()
-        sys.exit(1)
-            
-    print(f"\nUsing PCA file: {pca_f}")
-    print(f"Using sample info file: {sample_f}")
-    print(f"Using first {args.num_pcs} PCs for calculations.\n")
-    
-    calculate_metrics_per_superpopulation(pca_f, sample_f, num_pcs_to_use=args.num_pcs)
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
