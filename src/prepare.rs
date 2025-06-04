@@ -597,7 +597,6 @@ mod io_service_infrastructure {
                     break;
                 }
                 SelectOutcome::RequestReceived(request) => {
-                    let start_time = Instant::now();
                     let mut bytes_read_for_task: usize = 0;
 
                     match request {
