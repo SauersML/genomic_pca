@@ -151,6 +151,7 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     debug!("Sample names (first 5): {:?}", samples_info.sample_names.iter().take(5).collect::<Vec<_>>());
 
     info!("Processing {} VCF file(s) in parallel...", vcf_files.len());
+    let vcf_processing_start_time = Instant::now();
     let pb_vcf_style = ProgressStyle::default_bar()
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} VCFs ({percent}%) ETA: {eta}")
         .map_err(|e| anyhow!("Failed to create progress bar style: {}", e))?
@@ -177,6 +178,7 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
             Err(e) => processing_errors.push(anyhow!("Error processing VCF file {}: {}", vcf_files[i].display(), e)),
         }
     }
+    info!("Parallel VCF file processing completed in {:.2?}.", vcf_processing_start_time.elapsed());
 
     if !processing_errors.is_empty() {
         for err in processing_errors { error!("{}", err); }
@@ -187,6 +189,7 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     }
 
     info!("Aggregating variant data from {} processed VCF file segments...", all_good_chromosome_data.len());
+    let vcf_aggregation_start_time = Instant::now();
     let (variant_ids, numerical_genotypes_variant_major) = aggregate_chromosome_data(all_good_chromosome_data);
     let num_total_variants = variant_ids.len();
     info!("Aggregated {} variants in total across all VCFs.", num_total_variants);
@@ -194,8 +197,11 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
 
     info!("Building genotype matrix ({} samples x {} variants) for VCF workflow...", samples_info.sample_count, num_total_variants);
     let genotype_matrix = build_matrix(numerical_genotypes_variant_major, samples_info.sample_count)?;
+    info!("VCF data aggregation and matrix construction completed in {:.2?}.", vcf_aggregation_start_time.elapsed());
 
-    info!("Running PCA using efficient-pca library...");
+
+    info!("Running PCA using efficient-pca library for VCF workflow...");
+    let vcf_pca_algo_start_time = Instant::now();
     let (_pca_model, transformed_pcs, pc_variances) = run_genomic_pca(genotype_matrix, cli_args)?;
     info!("VCF PCA computation complete. Resulted in {} principal components.", transformed_pcs.ncols());
 
@@ -206,11 +212,25 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
             info!("Created output directory: {}", parent.display());
         }
     }
+    info!("VCF PCA computation (efficient-pca rfit) completed in {:.2?}.", vcf_pca_algo_start_time.elapsed());
+
     info!("Writing VCF PCA results to files with prefix '{}'...", cli_args.output_prefix);
+    let vcf_output_writing_start_time = Instant::now();
 
     output_writer::write_principal_components_f64(&cli_args.output_prefix, &samples_info.sample_names, &transformed_pcs)?;
     output_writer::write_eigenvalues(&cli_args.output_prefix, &pc_variances)?;
     warn!("Loadings output for VCF-based PCA is currently skipped (not directly available from efficient-pca rfit).");
+    info!("VCF PCA results written in {:.2?}.", vcf_output_writing_start_time.elapsed());
+
+
+    info!("--- VCF Workflow Stage Timings ---");
+    // Note: This aggregates some of the logged times manually for a summary.
+    // A more structured timing vector like in EigenSNP workflow could be implemented if desired.
+    info!("{:<40}: {:.2?}", "VCF File Processing (Parallel)", vcf_processing_start_time.elapsed());
+    info!("{:<40}: {:.2?}", "VCF Aggregation & Matrix Build", vcf_aggregation_start_time.elapsed());
+    info!("{:<40}: {:.2?}", "VCF PCA Algorithm (efficient-pca)", vcf_pca_algo_start_time.elapsed());
+    info!("{:<40}: {:.2?}", "VCF Output Writing", vcf_output_writing_start_time.elapsed());
+
 
     Ok(())
 }
@@ -237,19 +257,28 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     let _physical_cpus = num_cpus::get_physical(); // Not used in budget calculation yet, but good to query
 
     // Calculate Resource Budgets
-    const FDS_RESERVED_FOR_RUNTIME: usize = 50;
-    const THREADS_RESERVED_FOR_RUNTIME_AND_COMPUTE_POOL_BASE: usize = 10;
-    
     let actual_num_compute_threads = rayon::current_num_threads();
 
-    let max_io_actors_by_fds = (rlimit_nofile_soft.saturating_sub(FDS_RESERVED_FOR_RUNTIME)).max(1);
-    let max_io_actors_by_nproc = (rlimit_nproc_soft.saturating_sub(actual_num_compute_threads).saturating_sub(THREADS_RESERVED_FOR_RUNTIME_AND_COMPUTE_POOL_BASE)).max(1);
-    let absolute_max_io_actors_for_ioservice = max_io_actors_by_fds.min(max_io_actors_by_nproc);
+    // For the IoService, especially with chunked I/O where each bed_reader call is internally parallel,
+    // the number of concurrent I/O actors should be modest to avoid oversubscription.
+    // Using a fraction of available compute threads, or a fixed small number, is often better
+    // than basing it on system-wide rlimits for file descriptors or processes.
+    // Minimum of 2 to allow some I/O overlap, maximum of 16 as a heuristic upper bound for dispatching.
+    // This may require further tuning based on system I/O capabilities vs CPU speed.
+    const MIN_EFFECTIVE_IO_ACTORS: usize = 2;
+    const MAX_HEURISTIC_IO_ACTORS: usize = 16; // Heuristic cap
+    let absolute_max_io_actors_for_ioservice = (actual_num_compute_threads / 2) // Allow compute threads to primarily focus on Rayon tasks
+                                               .max(MIN_EFFECTIVE_IO_ACTORS)
+                                               .min(MAX_HEURISTIC_IO_ACTORS);
 
     // Log Derived Boundaries
-    info!("Resource Limits & Budgets: RLIMIT_NOFILE_SOFT={}, RLIMIT_NPROC_SOFT={}, Actual Rayon Compute Threads={}, Max IO Actors for IO Service={}",
+    info!(
+        "Resource Info & Effective Settings: RLIMIT_NOFILE_SOFT={}, RLIMIT_NPROC_SOFT={}, Actual Rayon Compute Threads={}, Effective Max IO Actors for IoService={}",
         rlimit_nofile_soft, rlimit_nproc_soft, actual_num_compute_threads, absolute_max_io_actors_for_ioservice
     );
+
+    let mut stage_timings: Vec<(String, Duration)> = Vec::new();
+    let stage_start_time = Instant::now();
 
     // 1. Create Configurations from cli_args
     let bed_file_path_str = cli_args.bed_file.as_ref()
@@ -286,20 +315,27 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     };
 
     // 2. Prepare Data using MicroarrayDataPreparer (from crate::prepare)
-    info!("Initializing MicroarrayDataPreparer (from src/prepare.rs)...");
+    info!("Initializing MicroarrayDataPreparer (includes initial BIM/FAM metadata loading)...");
+    let preparer_init_start = Instant::now();
     let preparer = MicroarrayDataPreparer::try_new(
         prep_config,
-        absolute_max_io_actors_for_ioservice, // New argument
+        absolute_max_io_actors_for_ioservice,
     )
         .map_err(|e| anyhow!("Failed to initialize MicroarrayDataPreparer from src/prepare.rs: {}", e))?;
+    stage_timings.push(("Preparer Initialization".to_string(), preparer_init_start.elapsed()));
+    info!("MicroarrayDataPreparer initialized in {:.2?}.", preparer_init_start.elapsed());
 
-    info!("Preparing data for EigenSNP-Rust (using src/prepare.rs)...");
+    info!("Preparing data for EigenSNP-Rust (includes QC, standardization, LD mapping)...");
     // prepare_data_for_eigen_snp returns types from efficient_pca::eigensnp if src/prepare.rs was modified correctly
+    let main_data_prep_start = Instant::now();
     let (genotype_accessor, ld_block_specifications, num_qc_samples, num_pca_snps) =
         preparer.prepare_data_for_eigen_snp()
             .map_err(|e| anyhow!("Data preparation (src/prepare.rs) for EigenSNP-Rust failed: {}", e))?;
-    
-    info!("EigenSNP-Rust Data prepared: {} QC'd samples, {} PCA SNPs for analysis.", num_qc_samples, num_pca_snps);
+    stage_timings.push(("Main Data Preparation (QC, LD Map)".to_string(), main_data_prep_start.elapsed()));
+    info!(
+        "EigenSNP-Rust Data prepared in {:.2?}: {} QC'd samples, {} PCA SNPs for analysis.",
+        main_data_prep_start.elapsed(), num_qc_samples, num_pca_snps
+    );
 
     if num_qc_samples == 0 || num_pca_snps == 0 {
         warn!("No samples or SNPs available for EigenSNP-Rust PCA after preparation. EigenSNP-Rust workflow will not proceed further.");
@@ -313,10 +349,14 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     info!("Computing EigenSNP-Rust PCA...");
     // compute_pca expects &impl PcaReadyGenotypeAccessor and &[LdBlockSpecification]
     // where these types are from efficient_pca::eigensnp
+    let eigensnp_algo_start = Instant::now();
     let (pca_output, diagnostics_option) = algorithm.compute_pca(&genotype_accessor, &ld_block_specifications)
         .map_err(|e| anyhow!("EigenSNP-Rust PCA computation (efficient_pca crate) failed: {}", e))?;
+    stage_timings.push(("EigenSNP Algorithm".to_string(), eigensnp_algo_start.elapsed()));
+    info!("EigenSNP-Rust PCA algorithm completed in {:.2?}.", eigensnp_algo_start.elapsed());
 
     // 4. Write Outputs
+    let output_writing_start = Instant::now();
     let output_prefix_path = PathBuf::from(&cli_args.output_prefix);
      if let Some(parent) = output_prefix_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -378,6 +418,18 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     }
     #[cfg(not(feature = "eigensnp-diagnostics"))]
     { let _ = diagnostics_option; /* Mark as used if diagnostics feature is off */ }
+
+    stage_timings.push(("Output Writing".to_string(), output_writing_start.elapsed()));
+    info!("EigenSNP-Rust results written in {:.2?}.", output_writing_start.elapsed());
+
+    info!("--- EigenSNP-Rust Workflow Stage Timings ---");
+    for (stage_name, duration) in &stage_timings {
+        info!("{:<40}: {:.2?}", stage_name, duration);
+    }
+    let total_eigensnp_workflow_time = stage_start_time.elapsed();
+    info!("{:<40}: {:.2?}", "Total EigenSNP Workflow Time (main.rs)", total_eigensnp_workflow_time);
+    // Note: This total is from within run_eigensnp_rust_workflow.
+    // The overall main function total_time_start includes CLI parsing and logger init.
 
     Ok(())
 }
