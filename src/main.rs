@@ -191,10 +191,9 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
 
     info!("Aggregating variant data from {} processed VCF file segments...", all_good_chromosome_data.len());
     let vcf_aggregation_start_time = Instant::now();
-    let (variant_ids, all_chromosomes, all_positions, numerical_genotypes_variant_major) = aggregate_chromosome_data(all_good_chromosome_data);
-    info!("Number of chromosome entries aggregated: {}", all_chromosomes.len());
-    info!("Number of position entries aggregated: {}", all_positions.len());
+    let (variant_ids, numerical_genotypes_variant_major) = aggregate_chromosome_data(all_good_chromosome_data);
     let num_total_variants = variant_ids.len();
+
     info!("Aggregated {} variants in total across all VCFs.", num_total_variants);
     if num_total_variants == 0 { return Err(anyhow!("No variants available for PCA after aggregation.")); }
 
@@ -314,6 +313,7 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
         snp_processing_strip_size: cli_args.eigensnp_snp_strip_size.unwrap_or(2000),
         refine_pass_count: cli_args.eigensnp_refine_passes.unwrap_or(1),
         collect_diagnostics: cli_args.eigensnp_collect_diagnostics,
+        #[cfg(feature = "enable-eigensnp-diagnostics")]
         diagnostic_block_list_id_to_trace: None,
     };
 
