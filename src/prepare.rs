@@ -1358,12 +1358,6 @@ impl MicroarrayDataPreparer {
         }
 
         let num_final_qc_snps = all_final_qc_snps_details.len();
-                num_batches,
-                all_final_qc_snps_details.len()
-            );
-        }
-
-        let num_final_qc_snps = all_final_qc_snps_details.len();
         info!(
             "SNP QC & Stats calculation complete. {} / {} initial SNPs passed all filters.",
             num_final_qc_snps, num_total_initial_snps
