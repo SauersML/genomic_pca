@@ -12,10 +12,8 @@ use std::{
 
 
 pub mod vcf_processing {
-    use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, VcfRecord}; // Added VcfRecord, ensured cli is not present
-    // Removed local noodles_vcf import block that was here
-    
-    
+    use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, VcfRecord};
+        
     use noodles_vcf::variant::record::samples::series::Value as GenotypeValue;
      // Explicitly import for `samples::` paths if needed
     use noodles_vcf::variant::record::AlternateBases as _; // Use _ to import trait methods
@@ -47,8 +45,6 @@ pub mod vcf_processing {
     #[derive(Debug)]
     pub struct VariantGenotypeData {
         pub id: String,
-        pub chromosome: String,
-        pub position: u64,
         pub numerical_genotypes: Vec<u8>,
     }
 
