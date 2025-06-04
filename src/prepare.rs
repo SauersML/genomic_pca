@@ -1,7 +1,6 @@
 use flume;
 use log::{debug, error, info, warn};
-#[allow(unused_imports)] // Silencing warning as Array1 is intentionally kept
-use ndarray::{Array1, Array2}; // do not remove Array1
+use ndarray::{Array1, Array2};
 use num_cpus;
 use rayon::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
@@ -165,7 +164,7 @@ mod io_service_infrastructure {
     use super::*;
     use flume;
     use log::{debug, error, info, warn};
-    use ndarray::{Array1, Array2};
+    use ndarray::{Array2};
     use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
@@ -598,7 +597,6 @@ mod io_service_infrastructure {
                     break;
                 }
                 SelectOutcome::RequestReceived(request) => {
-                    let queue_len_at_pickup = request_rx.len();
                     let start_time = Instant::now();
                     let mut bytes_read_for_task: usize = 0;
 
@@ -707,7 +705,6 @@ mod io_service_infrastructure {
                             }
                         }
                     }
-                    let duration_micros = start_time.elapsed().as_micros() as u64;
                     match metrics_tx.try_send(IoTaskMetrics {
                         bytes_read: bytes_read_for_task,
                     }) {
