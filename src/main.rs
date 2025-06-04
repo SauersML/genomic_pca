@@ -306,18 +306,18 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
         sample_ids_to_keep_file_path: cli_args.eigensnp_sample_keep_file.as_ref().map(|p| p.to_string_lossy().into_owned()),
         min_snp_call_rate_threshold: cli_args.eigensnp_min_call_rate.unwrap_or(0.98),
         min_snp_maf_threshold: cli_args.eigensnp_min_maf.unwrap_or(0.01),
-        max_snp_hwe_p_value_threshold: cli_args.eigensnp_max_hwe_p.unwrap_or(1e-6),
+        max_snp_hwe_p_value_threshold: cli_args.eigensnp_max_hwe_p.unwrap_or(1e-4),
     };
 
     let algo_config = EigenSNPCoreAlgorithmConfig {
         target_num_global_pcs: cli_args.eigensnp_k_global.unwrap_or(10),
         components_per_ld_block: cli_args.eigensnp_components_per_block.unwrap_or(7),
-        subset_factor_for_local_basis_learning: cli_args.eigensnp_subset_factor.unwrap_or(0.075),
-        min_subset_size_for_local_basis_learning: cli_args.eigensnp_min_subset_size.unwrap_or(10_000),
-        max_subset_size_for_local_basis_learning: cli_args.eigensnp_max_subset_size.unwrap_or(40_000),
+        subset_factor_for_local_basis_learning: cli_args.eigensnp_subset_factor.unwrap_or(0.1),
+        min_subset_size_for_local_basis_learning: cli_args.eigensnp_min_subset_size.unwrap_or(20_000),
+        max_subset_size_for_local_basis_learning: cli_args.eigensnp_max_subset_size.unwrap_or(60_000),
         global_pca_sketch_oversampling: cli_args.eigensnp_global_oversampling.unwrap_or(10),
         global_pca_num_power_iterations: cli_args.eigensnp_global_power_iter.unwrap_or(2),
-        local_rsvd_sketch_oversampling: cli_args.eigensnp_local_oversampling.unwrap_or(10),
+        local_rsvd_sketch_oversampling: cli_args.eigensnp_local_oversampling.unwrap_or(4),
         local_rsvd_num_power_iterations: cli_args.eigensnp_local_power_iter.unwrap_or(2),
         random_seed: cli_args.eigensnp_seed.unwrap_or(2025),
         snp_processing_strip_size: cli_args.eigensnp_snp_strip_size.unwrap_or(2000),
