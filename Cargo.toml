@@ -46,22 +46,29 @@ ndarray-linalg = { version = "0.17.0", default-features = false }
 thiserror = "2.0.12"
 
 [features]
+# Default build: genomic_pca uses ndarray-linalg with OpenBLAS,
+# and efficient_pca uses its ndarray-linalg based OpenBLAS strategy.
 default = ["openblas-openblas"]
 
-# Format: [genomic_pca backend]-[efficient_pca backend]
+# Format: [ndarray-linalg backend for genomic_pca]-[efficient_pca strategy]
 
-# 1. OpenBLAS + OpenBLAS
+# 1. genomic_pca uses ndarray-linalg with OpenBLAS.
+#    efficient_pca uses its `backend_openblas` strategy (which also implies ndarray-linalg/openblas-static).
 openblas-openblas = ["ndarray-linalg/openblas-static", "efficient_pca/backend_openblas"]
 
-# 2. OpenBLAS + Faer (genomic uses OpenBLAS, efficient uses Faer)
+# 2. genomic_pca uses ndarray-linalg with OpenBLAS.
+#    efficient_pca uses its `backend_faer` strategy (which is "dep:faer" and doesn't force an ndarray-linalg backend).
 openblas-faer = ["ndarray-linalg/openblas-static", "efficient_pca/backend_faer"]
 
-# 4. MKL + MKL
+# 3. genomic_pca uses ndarray-linalg with MKL.
+#    efficient_pca uses its `backend_mkl` strategy (which also implies ndarray-linalg/intel-mkl-static).
 mkl-mkl = ["ndarray-linalg/intel-mkl-static", "efficient_pca/backend_mkl"]
 
-# 5. MKL + Faer (genomic uses Intel MKL, efficient uses Faer)
+# 4. genomic_pca uses ndarray-linalg with MKL.
+#    efficient_pca uses its `backend_faer` strategy.
 mkl-faer = ["ndarray-linalg/intel-mkl-static", "efficient_pca/backend_faer"]
 
+# Utility features
 jemalloc = ["efficient_pca/jemalloc"]
 eigensnp-diagnostics = ["efficient_pca/enable-eigensnp-diagnostics", "dep:serde_json"]
 
@@ -73,6 +80,6 @@ strip = true
 opt-level = 3
 
 [profile.profiling]
-inherits = "release" # Inherit settings from the release profile
-debug = true         # Enable debug symbols
-strip = false        # Do not strip symbols
+inherits = "release"
+debug = true
+strip = false
