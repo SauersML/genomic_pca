@@ -348,10 +348,15 @@ def main():
             # Left Subplot: Plot swept data first
             ax_left.set_ylabel("Improvement vs Baseline (%)")
             ax_left.set_title(f"{metric_props['name']}\nPer Superpopulation")
+            superpopulation_colors = {} # Initialize color mapping for the current metric's superpopulation lines
             if not df_plot_ready.empty:
                 for superpop_label in sorted(df_plot_ready["superpopulation"].unique()):
                     df_superpop_plot = df_plot_ready[df_plot_ready["superpopulation"] == superpop_label].sort_values("swept_param_value_numeric")
-                    ax_left.plot(df_superpop_plot["swept_param_value_numeric"], df_superpop_plot[f"percent_better_{metric_key}"], marker='o', linestyle='-', label=superpop_label, markersize=5, alpha=0.8)
+                    # Plot the main line for the superpopulation
+                    line = ax_left.plot(df_superpop_plot["swept_param_value_numeric"], df_superpop_plot[f"percent_better_{metric_key}"], marker='o', linestyle='-', label=superpop_label, markersize=5, alpha=0.8)
+                    # Store the color used for this superpopulation to apply to its corresponding Exact PCA line
+                    if superpop_label not in superpopulation_colors:
+                        superpopulation_colors[superpop_label] = line[0].get_color()
             
             # Determine Y-limits for ax_left based on swept data
             y_min_swept_left, y_max_swept_left = (np.nan, np.nan)
@@ -374,13 +379,20 @@ def main():
 
             # Left Subplot: Plot Exact PCA reference lines
             relevant_exact_pca_for_metric = df_exact_pca_metrics[pd.notna(df_exact_pca_metrics[f"percent_better_{metric_key}"])].copy()
-            exact_pca_legend_added_ax_left = False
+            # The variable exact_pca_legend_added_ax_left is no longer needed as specific legend for these lines is removed.
             if not relevant_exact_pca_for_metric.empty:
                 for _, exact_row in relevant_exact_pca_for_metric.iterrows():
                     exact_val = exact_row[f"percent_better_{metric_key}"]
-                    plot_y = exact_val
-                    marker_char = None
+                    superpop_of_exact = exact_row["superpopulation"]
                     
+                    # Get the color used for this superpopulation in the main swept data plot.
+                    # Fallback to 'dimgray' if the superpopulation was not in the swept data (e.g., only in Exact PCA).
+                    line_color = superpopulation_colors.get(superpop_of_exact, 'dimgray')
+                                       
+                    plot_y = exact_val
+                    marker_char = None # For indicating values capped at plot limits
+                    
+                    # Cap the plotted y-value and set marker if it's outside the current y-limits
                     if exact_val > y_plot_max_left:
                         plot_y = y_plot_max_left
                         marker_char = '^'
@@ -388,15 +400,14 @@ def main():
                         plot_y = y_plot_min_left
                         marker_char = 'v'
                     
-                    label_for_exact_line = "_nolegend_"
-                    if not exact_pca_legend_added_ax_left:
-                        label_for_exact_line = EXACT_PCA_DISPLAY_NAME
-                        exact_pca_legend_added_ax_left = True
+                    # Plot the horizontal line for Exact PCA.
+                    # Style: Use the superpopulation's color, make it dotted, and transparent.
+                    # No separate legend entry (label="_nolegend_") as these lines are now styled variants of main superpopulation lines.
+                    ax_left.axhline(y=plot_y, color=line_color, linestyle=':', linewidth=1.5, alpha=0.6, label="_nolegend_")
                     
-                    ax_left.axhline(y=plot_y, color='magenta', linestyle='-.', linewidth=1.5, alpha=0.9, label=label_for_exact_line)
                     if marker_char:
-                        ax_left.plot(ax_left.get_xlim()[1] * 0.98, plot_y, marker=marker_char, color='magenta', markersize=7, clip_on=False, linestyle='None')
-
+                        # If a marker is used (value capped), it should also use the superpopulation-specific color.
+                        ax_left.plot(ax_left.get_xlim()[1] * 0.98, plot_y, marker=marker_char, color=line_color, markersize=7, clip_on=False, linestyle='None')
 
             # Right Subplot: Plot swept data aggregates first
             ax_right.set_title(f"{metric_props['name']}\nAggregated (Mean/Median)")
