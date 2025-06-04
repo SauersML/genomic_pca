@@ -7,7 +7,7 @@ Outputs one TSV (default population_metrics_summary.tsv) with columns:
   Superpopulation
   Number_of_samples
   Number_of_subpopulations
-  Mutual_information_nats
+  logreg_balanced_accuracy_cv
   Mean_multivariate_Jensen_Shannon_divergence_nats
   Median_multivariate_Jensen_Shannon_divergence_nats
   Average_silhouette
@@ -26,9 +26,11 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
-from sklearn.metrics import silhouette_samples, adjusted_mutual_info_score
+from sklearn.metrics import silhouette_samples, adjusted_mutual_info_score, make_scorer, balanced_accuracy_score
 from sklearn.neighbors import KernelDensity
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score, StratifiedKFold
 import hdbscan
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
@@ -158,8 +160,49 @@ def best_hdbscan_adjusted_mutual_information(
             )
             best_ami = max(best_ami, ami_value)
 
-    return float(best_ami)  # could be 0.0 if no real clustering emerged
+return float(best_ami)  # could be 0.0 if no real clustering emerged
 
+
+def logistic_regression_balanced_accuracy(
+    pc_matrix: np.ndarray,
+    subpopulation_labels: np.ndarray,
+    n_cv_splits: int = 5,
+    random_seed: int = 42,
+) -> float:
+    """
+    Calculate k-fold cross-validated balanced accuracy of an unregularized
+    logistic regression model predicting subpopulation labels from PCs.
+    """
+    unique_classes = np.unique(subpopulation_labels)
+    if len(unique_classes) < 2:
+        # Not enough classes for classification
+        return np.nan
+
+    class_counts = {label: count for label, count in zip(*np.unique(subpopulation_labels, return_counts=True))}
+    if pc_matrix.shape[0] < n_cv_splits or any(count < n_cv_splits for count in class_counts.values()):
+        return np.nan
+
+    # Encode string labels to numeric for scikit-learn
+    le = LabelEncoder()
+    numeric_labels = le.fit_transform(subpopulation_labels)
+
+    # Unregularized Logistic Regression: penalty=None
+    model = LogisticRegression(
+        penalty=None,  # No regularization
+        solver='lbfgs',
+        multi_class='auto', # Automatically handles multi-class
+        random_state=random_seed,
+        max_iter=300 # Increased iterations
+    )
+
+    cv_strategy = StratifiedKFold(n_splits=n_cv_splits, shuffle=True, random_state=random_seed)
+    balanced_accuracy_scorer = make_scorer(balanced_accuracy_score)
+
+    try:
+        scores = cross_val_score(model, pc_matrix, numeric_labels, cv=cv_strategy, scoring=balanced_accuracy_scorer)
+        return float(np.mean(scores))
+    except ValueError as e:
+        return np.nan
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Core routine
@@ -202,7 +245,7 @@ def compute_metrics_for_superpopulations(
         "Superpopulation",
         "Number_of_samples",
         "Number_of_subpopulations",
-        "Mutual_information_nats",
+        "LogReg_Balanced_Accuracy_CV",
         "Mean_multivariate_Jensen_Shannon_divergence_nats",
         "Median_multivariate_Jensen_Shannon_divergence_nats",
         "Average_silhouette",
@@ -222,13 +265,11 @@ def compute_metrics_for_superpopulations(
         # KDEs for MI & JSD
         kde_dict, pooled_kde = fit_gaussian_kdes(pc_matrix, subpopulation_labels)
 
-        # Mutual information
-        unique_subpops, counts = np.unique(subpopulation_labels, return_counts=True)
-        class_priors = {
-            label: cnt / len(subset) for label, cnt in zip(unique_subpops, counts)
-        }
-        mutual_information_nats = monte_carlo_mutual_information(
-            kde_dict, pooled_kde, class_priors, samples_per_label=monte_carlo_samples
+        # Logistic Regression Balanced Accuracy (CV)
+        unique_subpops, _ = np.unique(subpopulation_labels, return_counts=True) # _ signifies counts are not used here
+        
+        logreg_balanced_accuracy_cv = logistic_regression_balanced_accuracy(
+            pc_matrix, subpopulation_labels
         )
 
         # Pairwise JSDs
@@ -270,7 +311,7 @@ def compute_metrics_for_superpopulations(
                         superpopulation_code,
                         len(subset),
                         len(unique_subpops),
-                        f"{mutual_information_nats:.6f}",
+                        f"{logreg_balanced_accuracy_cv:.6f}",
                         f"{mean_jsd:.6f}",
                         f"{median_jsd:.6f}",
                         f"{average_silhouette:.6f}",
@@ -310,7 +351,7 @@ def main() -> None:
         "--mc_samples",
         type=int,
         default=4_000,
-        help="Monte-Carlo samples per KDE for MI and JSD estimates.",
+        help="Monte-Carlo samples per KDE for JSD estimates.",
     )
     parser.add_argument(
         "--output_tsv",
