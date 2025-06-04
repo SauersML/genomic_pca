@@ -1,5 +1,6 @@
 use flume;
 use log::{debug, error, info, warn};
+#[allow(unused_imports)] // Silencing warning as Array1 is intentionally kept
 use ndarray::{Array1, Array2}; // do not remove Array1
 use num_cpus;
 use rayon::prelude::*;
@@ -154,8 +155,6 @@ pub struct MicroarrayDataPreparer {
     initial_bim_sids: Arc<Array1<String>>,
     initial_bim_chromosomes: Arc<Array1<String>>,
     initial_bim_bp_positions: Arc<Array1<i32>>,
-    initial_bim_allele1_alleles: Arc<Array1<String>>,
-    initial_bim_allele2_alleles: Arc<Array1<String>>,
     initial_snp_count_from_bim: usize,
     initial_sample_count_from_fam: usize,
     initial_sample_ids_from_fam: Arc<Array1<String>>,
@@ -218,10 +217,7 @@ mod io_service_infrastructure {
     }
 
     pub(crate) struct IoTaskMetrics {
-        pub(crate) actor_id: usize,
         pub(crate) bytes_read: usize,
-        pub(crate) duration_micros: u64,
-        pub(crate) queue_len_at_pickup: usize,
     }
 
     pub(crate) struct IoActorHandle {
@@ -713,10 +709,7 @@ mod io_service_infrastructure {
                     }
                     let duration_micros = start_time.elapsed().as_micros() as u64;
                     match metrics_tx.try_send(IoTaskMetrics {
-                        actor_id,
                         bytes_read: bytes_read_for_task,
-                        duration_micros,
-                        queue_len_at_pickup,
                     }) {
                         Ok(_) => {}
                         Err(flume::TrySendError::Full(_)) => {
@@ -940,8 +933,6 @@ impl MicroarrayDataPreparer {
         let initial_bim_sids: Arc<Array1<String>>;
         let initial_bim_chromosomes: Arc<Array1<String>>;
         let initial_bim_bp_positions: Arc<Array1<i32>>;
-        let initial_bim_allele1_alleles: Arc<Array1<String>>;
-        let initial_bim_allele2_alleles: Arc<Array1<String>>;
         let initial_snp_count_from_bim: usize;
         let initial_sample_count_from_fam: usize;
         let initial_sample_ids_from_fam: Arc<Array1<String>>;
@@ -950,18 +941,6 @@ impl MicroarrayDataPreparer {
             let mut bed_for_metadata = Bed::new(&config.bed_file_path)
                 .wrap_err_with_context(|| format!("Failed to open BED file '{}' for initial metadata", config.bed_file_path))?;
 
-            initial_bim_allele1_alleles = Arc::new(
-                bed_for_metadata
-                    .allele_1()
-                    .wrap_err_with_str("Failed to read allele_1 from BIM for initial metadata")?
-                    .to_owned(),
-            );
-            initial_bim_allele2_alleles = Arc::new(
-                bed_for_metadata
-                    .allele_2()
-                    .wrap_err_with_str("Failed to read allele_2 from BIM for initial metadata")?
-                    .to_owned(),
-            );
             initial_bim_sids = Arc::new(
                 bed_for_metadata
                     .sid()
@@ -1007,8 +986,6 @@ impl MicroarrayDataPreparer {
             initial_bim_sids,
             initial_bim_chromosomes,
             initial_bim_bp_positions,
-            initial_bim_allele1_alleles,
-            initial_bim_allele2_alleles,
             initial_snp_count_from_bim,
             initial_sample_count_from_fam,
             initial_sample_ids_from_fam,
