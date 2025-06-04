@@ -123,7 +123,7 @@ def contrastive_violation_statistics(
 def best_hdbscan_adjusted_mutual_information(
     data_matrix: np.ndarray,
     true_labels: np.ndarray,
-    search_fracs: Tuple[float, ...] = (0.02, 0.04, 0.06, 0.08, 0.10, 0.15),
+    search_fracs: Tuple[float, ...] = (0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20, 0.30),
 ) -> float:
     """
     Try several (min_cluster_size, min_samples) pairs and return the highest
@@ -135,7 +135,6 @@ def best_hdbscan_adjusted_mutual_information(
 
     for frac in search_fracs:
         min_cluster_size = max(2, int(round(frac * n)))
-        # heuristic: examine three min_samples values
         for min_samples in {1, min_cluster_size // 2, min_cluster_size}:
             clusterer = hdbscan.HDBSCAN(
                 min_cluster_size=min_cluster_size,
