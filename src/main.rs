@@ -313,7 +313,7 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
         snp_processing_strip_size: cli_args.eigensnp_snp_strip_size.unwrap_or(2000),
         refine_pass_count: cli_args.eigensnp_refine_passes.unwrap_or(1),
         collect_diagnostics: cli_args.eigensnp_collect_diagnostics,
-        #[cfg(feature = "enable-eigensnp-diagnostics")]
+        #[cfg(feature = "eigensnp-diagnostics")]
         diagnostic_block_list_id_to_trace: None,
     };
 
