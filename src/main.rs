@@ -20,6 +20,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
     time::Instant,
+    time::Duration,
 };
 use libc; // Added for getrlimit
 
@@ -190,7 +191,7 @@ fn run_vcf_workflow(cli_args: &CliArgs) -> Result<(), Error> {
 
     info!("Aggregating variant data from {} processed VCF file segments...", all_good_chromosome_data.len());
     let vcf_aggregation_start_time = Instant::now();
-    let (variant_ids, numerical_genotypes_variant_major) = aggregate_chromosome_data(all_good_chromosome_data);
+    let (variant_ids, _all_chromosomes, _all_positions, numerical_genotypes_variant_major) = aggregate_chromosome_data(all_good_chromosome_data);
     let num_total_variants = variant_ids.len();
     info!("Aggregated {} variants in total across all VCFs.", num_total_variants);
     if num_total_variants == 0 { return Err(anyhow!("No variants available for PCA after aggregation.")); }

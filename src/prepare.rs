@@ -1,6 +1,6 @@
 use flume;
 use log::{debug, error, info, warn};
-use ndarray::{Array1, Array2};
+use ndarray::{Array2};
 use num_cpus;
 use rayon::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
@@ -608,7 +608,7 @@ mod io_service_infrastructure {
 
                     match request {
                         IoRequest::GetSnpChunkForQc {
-                            original_m_indices, // This is now Vec<usize>
+                            original_m_indices, // This is Vec<usize>
                             qc_sample_indices,
                             response_tx,
                         } => {
@@ -622,6 +622,7 @@ mod io_service_infrastructure {
                             // Read an entire chunk of SNPs.
                             // Request C-order to get data as (samples, snps_in_chunk),
                             // which is convenient for column-wise (per-SNP) QC processing later.
+                            // bed_reader's internal Rayon parallelism will be used here effectively.
                             let read_result = ReadOptions::builder()
                                 .sid_index(original_m_indices_isize.as_slice()) // Pass the chunk of SIDs
                                 .iid_index(qc_sample_indices_slice)
@@ -634,14 +635,17 @@ mod io_service_infrastructure {
                             let response = match read_result {
                                 Ok(array_samples_x_snps_in_chunk) => {
                                     // array_samples_x_snps_in_chunk has dimensions (num_qc_samples, original_m_indices.len())
-                                    // Estimate bytes read for the chunk.
+                                    // Estimate bytes read for the chunk. This is an approximation of packed BED size.
                                     bytes_read_for_task = (array_samples_x_snps_in_chunk.nrows() * array_samples_x_snps_in_chunk.ncols() + 3) / 4;
                                     IoResponse::RawSnpChunkForQc {
                                         raw_genotypes_i8_chunk_result: Ok(array_samples_x_snps_in_chunk),
-                                        original_m_indices_in_chunk: original_m_indices, // Pass back original indices for mapping
+                                        // Clone original_m_indices here to transfer ownership of the clone to the response,
+                                        // while the original original_m_indices remains in scope for subsequent logging.
+                                        original_m_indices_in_chunk: original_m_indices.clone(),
                                     }
                                 }
                                 Err(e) => {
+                                    // These logging lines can safely borrow original_m_indices as it has not been moved yet.
                                     let num_snps_in_failed_chunk = original_m_indices.len();
                                     let first_snp_idx_in_failed_chunk = original_m_indices.first().map_or_else(|| "N/A".to_string(), |v| v.to_string());
                                     warn!(
@@ -653,12 +657,16 @@ mod io_service_infrastructure {
                                             "Bed read failed for GetSnpChunkForQc ({} SNPs, starting original_idx {}): {:?}",
                                             num_snps_in_failed_chunk, first_snp_idx_in_failed_chunk, e
                                         )),
-                                        original_m_indices_in_chunk: original_m_indices,
+                                        // Clone original_m_indices here as well for the error path.
+                                        original_m_indices_in_chunk: original_m_indices.clone(),
                                     }
                                 }
                             };
+                            // The `response` now owns a clone of `original_m_indices`. The `original_m_indices`
+                            // in this function's scope is still valid and can be borrowed below.
                             if response_tx.send(response).is_err()
                             {
+                                // This borrow of original_m_indices is now safe.
                                 let first_snp_idx_in_dropped_chunk = original_m_indices.first().map_or_else(|| "N/A".to_string(), |v| v.to_string());
                                 debug!(
                                     "IoActor [{}]: Failed to send RawSnpChunkForQc response for chunk starting with original_idx {}. Receiver likely dropped.",
