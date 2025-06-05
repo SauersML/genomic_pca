@@ -14,4 +14,5 @@ rustflags = ["-C", "profile-generate=/tmp/pgo-data"]
 
 [profile.profiling-use]
 inherits = "release"
-rustflags = ["-C", "profile-use=/tmp/pgo-data/"]
+# This points to the specific file that llvm-profdata will create
+rustflags = ["-C", "profile-use=/tmp/pgo-data/merged.profdata"]
