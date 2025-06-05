@@ -1930,11 +1930,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     }
                                     let target_slice: &mut [std::mem::MaybeUninit<f32>] = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
                                     unsafe {
-                                        let initialized_slice = std::slice::from_raw_parts_mut(
-                                            target_slice.as_mut_ptr() as *mut f32,
-                                            LANES_I8_F32_8
-                                        );
-                                        simd_zeros.write_to_slice_unaligned(initialized_slice);
+                                        simd_zeros.store_unaligned(target_slice.as_mut_ptr() as *mut f32);
                                     }
                                     i_req_sample += LANES_I8_F32_8;
                                 }
@@ -1983,11 +1979,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     let standardized_chunk = (raw_f32_chunk - simd_mean) / simd_std_dev;
                                     let target_slice: &mut [std::mem::MaybeUninit<f32>] = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
                                     unsafe {
-                                        let initialized_slice = std::slice::from_raw_parts_mut(
-                                            target_slice.as_mut_ptr() as *mut f32,
-                                            LANES_I8_F32_8
-                                        );
-                                        standardized_chunk.write_to_slice_unaligned(initialized_slice);
+                                        standardized_chunk.store_unaligned(target_slice.as_mut_ptr() as *mut f32);
                                     }
                                     i_req_sample += LANES_I8_F32_8;
                                 }
