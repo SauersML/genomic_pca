@@ -14,4 +14,4 @@ rustflags = ["-C", "profile-generate=/tmp/pgo-data"]
 
 [profile.profiling-use]
 inherits = "release"
-rustflags = ["-C", "profile-use=/tmp/pgo-data/default_%p_%m.profraw"]
+rustflags = ["-C", "profile-use=/tmp/pgo-data/"]
