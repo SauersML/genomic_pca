@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 // main.rs
 
 // --- Local Module Declarations ---
@@ -24,7 +25,7 @@ use std::{
 };
 use libc; // Added for getrlimit
 
-#![cfg_attr(
+#[cfg_attr(
     not(any(
         feature = "openblas-openblas",
         feature = "openblas-faer",

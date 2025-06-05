@@ -7,7 +7,7 @@ use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError};
 use thiserror::Error;
-use std::simd::{Simd, SimdPartialEq, SimdFloat, SimdInt, Mask};
+use std::simd::Simd; use std::simd::prelude::{SimdPartialEq, SimdFloat, SimdInt};
 
 // SIMD Lane constants
 // For i8 to f32 conversions and operations (e.g., standardization)
@@ -1909,7 +1909,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                             let simd_missing_i8 = Simd::<i8, LANES_I8_F32_8>::splat(-127i8);
 
                             if let (Some(raw_slice), Some(std_mut_slice)) = (raw_slice_option, std_mut_slice_option) {
-                                'simd_loop_zero_std_dev: while i_req_sample + LANES_I8_F32_8 <= num_samples_in_row {
+                                while i_req_sample + LANES_I8_F32_8 <= num_samples_in_row {
                                     let raw_chunk = Simd::<i8, LANES_I8_F32_8>::from_slice(&raw_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
                                     if raw_chunk.simd_eq(simd_missing_i8).any() {
                                         for k in 0..LANES_I8_F32_8 {
@@ -1927,7 +1927,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                         // i_req_sample += LANES_I8_F32_8;
                                         // continue 'simd_loop_zero_std_dev;
                                     }
-                                    simd_zeros.write_to_slice_unaligned(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    simd_zeros.write_to_slice(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
                                     i_req_sample += LANES_I8_F32_8;
                                 }
                             }
@@ -1936,16 +1936,16 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                 let raw_dosage_val_i8 = if let Some(slice) = raw_slice_option {
                                     slice[k_sample]
                                 } else {
-                                    *raw_snp_row.uget(k_sample).expect("Remainder loop read index out of bounds for raw_snp_row")
+                                    *raw_snp_row.uget(k_sample)
                                 };
                                 if raw_dosage_val_i8 == -127i8 {
                                     return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
                                                           pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[k_sample].0))) as ThreadSafeStdError);
                                 }
                                 if let Some(slice_mut) = std_mut_slice_option {
-                                    slice_mut[k_sample] = 0.0f32;
+                                    slice_mut[k_sample] = std::mem::MaybeUninit::new(0.0f32);
                                 } else {
-                                    standardized_snp_row_to_fill.uget_mut(k_sample).expect("Remainder loop write index out of bounds for standardized_snp_row_to_fill").write(0.0f32);
+                                    standardized_snp_row_to_fill.uget_mut(k_sample).write(0.0f32);
                                 }
                             }
                         } else { // std_dev_dosage is NOT near zero
@@ -1954,7 +1954,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                             let simd_missing_i8 = Simd::<i8, LANES_I8_F32_8>::splat(-127i8);
 
                             if let (Some(raw_slice), Some(std_mut_slice)) = (raw_slice_option, std_mut_slice_option) {
-                                'simd_loop_nonzero_std_dev: while i_req_sample + LANES_I8_F32_8 <= num_samples_in_row {
+                                while i_req_sample + LANES_I8_F32_8 <= num_samples_in_row {
                                     let raw_i8_chunk = Simd::<i8, LANES_I8_F32_8>::from_slice(&raw_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
                                     if raw_i8_chunk.simd_eq(simd_missing_i8).any() {
                                         for k in 0..LANES_I8_F32_8 {
@@ -1973,7 +1973,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     }
                                     let raw_f32_chunk: Simd<f32, LANES_I8_F32_8> = raw_i8_chunk.cast();
                                     let standardized_chunk = (raw_f32_chunk - simd_mean) / simd_std_dev;
-                                    standardized_chunk.write_to_slice_unaligned(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    standardized_chunk.write_to_slice(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
                                     i_req_sample += LANES_I8_F32_8;
                                 }
                             }
@@ -1982,7 +1982,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                 let raw_dosage_val_i8 = if let Some(slice) = raw_slice_option {
                                     slice[k_sample]
                                 } else {
-                                    *raw_snp_row.uget(k_sample).expect("Remainder loop read index out of bounds for raw_snp_row")
+                                    *raw_snp_row.uget(k_sample)
                                 };
                                 if raw_dosage_val_i8 == -127i8 {
                                      return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
@@ -1992,7 +1992,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                 if let Some(slice_mut) = std_mut_slice_option {
                                     slice_mut[k_sample] = standardized_val;
                                 } else {
-                                    standardized_snp_row_to_fill.uget_mut(k_sample).expect("Remainder loop write index out of bounds for standardized_snp_row_to_fill").write(standardized_val);
+                                    standardized_snp_row_to_fill.uget_mut(k_sample).write(standardized_val);
                                 }
                             }
                         }
