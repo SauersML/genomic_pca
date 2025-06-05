@@ -7,6 +7,15 @@ use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError};
 use thiserror::Error;
+use std::simd::{Simd, SimdPartialEq, SimdFloat, SimdInt, Mask};
+
+// SIMD Lane constants
+// For i8 to f32 conversions and operations (e.g., standardization)
+const LANES_I8_F32_8: usize = 8;
+// For f64 operations (e.g., sums and variance parts)
+const LANES_F64_4: usize = 4;
+// For i8 specific operations like counting
+const LANES_I8_16: usize = 16;
 
 // bed_reader imports
 use bed_reader::{Bed, BedErrorPlus, ReadOptions};
@@ -1226,23 +1235,73 @@ impl MicroarrayDataPreparer {
                                             return None;
                                         }
 
-                                        let mut allele1_dosage_sum_f64: f64 = 0.0;
-                                        let mut obs_hom_ref: usize = 0; let mut obs_het: usize = 0; let mut obs_hom_alt: usize = 0;
+                                        let valid_genotypes_slice: &[i8] = &valid_genotypes;
 
-                                        for &g_val_i8 in valid_genotypes.iter() {
-                                            allele1_dosage_sum_f64 += g_val_i8 as f64;
-                                            match g_val_i8 {
-                                                0 => obs_hom_ref += 1,
-                                                1 => obs_het += 1,
-                                                2 => obs_hom_alt += 1,
-                                                _ => { /* This case should not be reached for valid genotypes 0,1,2 */ }
+                                        // B1. Sum of Dosages (allele1_dosage_sum_f64)
+                                        let mut current_sum_f64 = 0.0_f64;
+                                        if num_valid_genotypes_for_snp > 0 {
+                                            let mut sum_vec_f64 = Simd::<f64, LANES_F64_4>::splat(0.0);
+                                            let mut i = 0;
+                                            while i + LANES_F64_4 <= num_valid_genotypes_for_snp {
+                                                let mut f64_temp_arr = [0.0f64; LANES_F64_4];
+                                                for lane_idx in 0..LANES_F64_4 {
+                                                     f64_temp_arr[lane_idx] = valid_genotypes_slice[i + lane_idx] as f64;
+                                                }
+                                                let i8_chunk_as_f64 = Simd::<f64, LANES_F64_4>::from_array(f64_temp_arr);
+                                                sum_vec_f64 += i8_chunk_as_f64;
+                                                i += LANES_F64_4;
+                                            }
+                                            current_sum_f64 = sum_vec_f64.reduce_sum();
+                                            for k in i..num_valid_genotypes_for_snp {
+                                                current_sum_f64 += valid_genotypes_slice[k] as f64;
                                             }
                                         }
+                                        let allele1_dosage_sum_f64 = current_sum_f64;
+
+                                        // B2. Genotype Counts (obs_hom_ref, obs_het, obs_hom_alt)
+                                        let mut current_obs_hom_ref: usize = 0;
+                                        let mut current_obs_het: usize = 0;
+                                        let mut current_obs_hom_alt: usize = 0;
+
+                                        if num_valid_genotypes_for_snp > 0 {
+                                            let simd_val_0_i8 = Simd::<i8, LANES_I8_16>::splat(0);
+                                            let simd_val_1_i8 = Simd::<i8, LANES_I8_16>::splat(1);
+                                            let simd_val_2_i8 = Simd::<i8, LANES_I8_16>::splat(2);
+                                            // No Simd<usize, ...> vectors here
+
+                                            let mut i = 0;
+                                            // Main SIMD loop for counts
+                                            while i + LANES_I8_16 <= num_valid_genotypes_for_snp {
+                                                let i8_chunk = Simd::<i8, LANES_I8_16>::from_slice(&valid_genotypes_slice[i..i + LANES_I8_16]);
+
+                                                let mask0 = i8_chunk.simd_eq(simd_val_0_i8);
+                                                let mask1 = i8_chunk.simd_eq(simd_val_1_i8);
+                                                let mask2 = i8_chunk.simd_eq(simd_val_2_i8);
+
+                                                current_obs_hom_ref += mask0.select(Simd::splat(1_u8), Simd::splat(0_u8)).reduce_sum() as usize;
+                                                current_obs_het     += mask1.select(Simd::splat(1_u8), Simd::splat(0_u8)).reduce_sum() as usize;
+                                                current_obs_hom_alt   += mask2.select(Simd::splat(1_u8), Simd::splat(0_u8)).reduce_sum() as usize;
+
+                                                i += LANES_I8_16;
+                                            }
+                                            // No horizontal sum of Simd<usize> vectors needed here.
+
+                                            // Scalar remainder loop for counts
+                                            for k in i..num_valid_genotypes_for_snp {
+                                                match valid_genotypes_slice[k] {
+                                                    0 => current_obs_hom_ref += 1,
+                                                    1 => current_obs_het += 1,
+                                                    2 => current_obs_hom_alt += 1,
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        let obs_hom_ref = current_obs_hom_ref;
+                                        let obs_het = current_obs_het;
+                                        let obs_hom_alt = current_obs_hom_alt;
 
                                         // MAF Check (calculated based on valid genotypes only)
                                         let total_alleles_obs_f64 = 2.0 * num_valid_genotypes_for_snp as f64;
-                                        // This check for total_alleles_obs_f64 < 1e-9 is redundant if num_valid_genotypes_for_snp == 0 is checked above.
-                                        // However, keeping it for robustness against potential floating point issues if num_valid_genotypes_for_snp is very small but non-zero.
                                         if total_alleles_obs_f64 < 1e-9 {
                                             debug!("SNP QC (idx {}): Total observed alleles from valid genotypes is effectively zero. Skipping MAF check.", original_m_idx);
                                             return None;
@@ -1250,13 +1309,11 @@ impl MicroarrayDataPreparer {
                                         let allele1_freq = allele1_dosage_sum_f64 / total_alleles_obs_f64;
                                         let maf = allele1_freq.min(1.0 - allele1_freq);
 
-                                        // Filter if monomorphic (allele1_freq is near 0 or 1) or MAF is below threshold.
                                         if maf < min_snp_maf_thresh || allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
                                             debug!("SNP QC (idx {}): Failed MAF check (MAF={:.4e}, threshold={:.4e} based on {} valid genotypes).", original_m_idx, maf, min_snp_maf_thresh, num_valid_genotypes_for_snp);
                                             return None;
                                         }
 
-                                        // HWE Check (only if threshold is less than 1.0, indicating HWE check is active)
                                         if max_snp_hwe_p_thresh < 1.0 {
                                             let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(obs_hom_ref, obs_het, obs_hom_alt);
                                             if hwe_p_val <= max_snp_hwe_p_thresh {
@@ -1265,13 +1322,39 @@ impl MicroarrayDataPreparer {
                                             }
                                         }
 
-                                        // Calculate mean and standard deviation based on valid genotypes.
                                         let mean_f32 = (allele1_dosage_sum_f64 / num_valid_genotypes_for_snp as f64) as f32;
-                                        let sum_sq_diff_f64: f64 = valid_genotypes.iter()
-                                            .map(|&g_val| (g_val as f64 - mean_f32 as f64).powi(2)).sum();
+
+                                        // C. Sum of squared differences
+                                        let mean_val_f64 = mean_f32 as f64;
+                                        let mut current_sum_sq_diff_f64 = 0.0_f64;
+
+                                        if num_valid_genotypes_for_snp > 0 {
+                                            let mut sum_sq_diff_vec_f64 = Simd::<f64, LANES_F64_4>::splat(0.0);
+                                            let simd_mean_f64 = Simd::<f64, LANES_F64_4>::splat(mean_val_f64);
+                                            let mut i = 0;
+
+                                            while i + LANES_F64_4 <= num_valid_genotypes_for_snp {
+                                                let mut f64_temp_arr = [0.0f64; LANES_F64_4];
+                                                for lane_idx in 0..LANES_F64_4 {
+                                                     f64_temp_arr[lane_idx] = valid_genotypes_slice[i + lane_idx] as f64;
+                                                }
+                                                let i8_chunk_as_f64 = Simd::<f64, LANES_F64_4>::from_array(f64_temp_arr);
+
+                                                let diff = i8_chunk_as_f64 - simd_mean_f64;
+                                                let diff_sq = diff * diff;
+                                                sum_sq_diff_vec_f64 += diff_sq;
+                                                i += LANES_F64_4;
+                                            }
+                                            current_sum_sq_diff_f64 = sum_sq_diff_vec_f64.reduce_sum();
+
+                                            for k in i..num_valid_genotypes_for_snp {
+                                                let diff_scalar = valid_genotypes_slice[k] as f64 - mean_val_f64;
+                                                current_sum_sq_diff_f64 += diff_scalar * diff_scalar;
+                                            }
+                                        }
+                                        let sum_sq_diff_f64 = current_sum_sq_diff_f64;
 
                                         let variance: f64;
-                                        // Variance calculation requires at least 2 valid observations.
                                         if num_valid_genotypes_for_snp >= 2 {
                                             variance = sum_sq_diff_f64 / (num_valid_genotypes_for_snp - 1) as f64;
                                         } else {
@@ -1811,27 +1894,106 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                         let pca_snp_id_val = pca_snp_ids_to_fetch[i_req_snp].0;
                         let mean_dosage = self.mean_allele1_dosages_for_pca_snps[pca_snp_id_val];
                         let std_dev_dosage = self.std_devs_allele1_dosages_for_pca_snps[pca_snp_id_val];
+
                         let raw_snp_row = raw_dosages_snps_by_samples_i8_array2.row(i_req_snp);
                         let mut standardized_snp_row_to_fill = standardized_block_f32.row_mut(i_req_snp);
 
+                        let num_samples_in_row = raw_snp_row.len();
+                        let raw_slice_option = raw_snp_row.as_slice();
+                        let std_mut_slice_option = standardized_snp_row_to_fill.as_slice_mut();
+
+                        let mut i_req_sample = 0;
+
                         if std_dev_dosage.abs() < 1e-9 {
-                            for i_req_sample in 0..num_requested_samples {
-                                let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
+                            let simd_zeros = Simd::<f32, LANES_I8_F32_8>::splat(0.0f32);
+                            let simd_missing_i8 = Simd::<i8, LANES_I8_F32_8>::splat(-127i8);
+
+                            if let (Some(raw_slice), Some(std_mut_slice)) = (raw_slice_option, std_mut_slice_option) {
+                                'simd_loop_zero_std_dev: while i_req_sample + LANES_I8_F32_8 <= num_samples_in_row {
+                                    let raw_chunk = Simd::<i8, LANES_I8_F32_8>::from_slice(&raw_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    if raw_chunk.simd_eq(simd_missing_i8).any() {
+                                        for k in 0..LANES_I8_F32_8 {
+                                            let current_idx = i_req_sample + k;
+                                            if raw_slice[current_idx] == -127i8 {
+                                                return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                                      pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[current_idx].0))) as ThreadSafeStdError);
+                                            }
+                                            // If we were to continue processing this chunk after an error (not current logic):
+                                            // std_mut_slice[current_idx] = 0.0f32;
+                                        }
+                                        // This part is currently unreachable due to the return Err above.
+                                        // If error handling changes to allow processing past a found error in a chunk,
+                                        // this increment and continue would be needed.
+                                        // i_req_sample += LANES_I8_F32_8;
+                                        // continue 'simd_loop_zero_std_dev;
+                                    }
+                                    simd_zeros.write_to_slice_unaligned(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    i_req_sample += LANES_I8_F32_8;
+                                }
+                            }
+                            // Scalar remainder loop (or full scalar if slices were not available)
+                            for k_sample in i_req_sample..num_samples_in_row {
+                                let raw_dosage_val_i8 = if let Some(slice) = raw_slice_option {
+                                    slice[k_sample]
+                                } else {
+                                    *raw_snp_row.uget(k_sample).expect("Remainder loop read index out of bounds for raw_snp_row")
+                                };
                                 if raw_dosage_val_i8 == -127i8 {
                                     return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
-                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0))) as ThreadSafeStdError);
+                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[k_sample].0))) as ThreadSafeStdError);
                                 }
-                                unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(0.0f32); }
+                                if let Some(slice_mut) = std_mut_slice_option {
+                                    slice_mut[k_sample] = 0.0f32;
+                                } else {
+                                    standardized_snp_row_to_fill.uget_mut(k_sample).expect("Remainder loop write index out of bounds for standardized_snp_row_to_fill").write(0.0f32);
+                                }
                             }
-                        } else {
-                            for i_req_sample in 0..num_requested_samples {
-                                let raw_dosage_val_i8 = raw_snp_row[i_req_sample];
+                        } else { // std_dev_dosage is NOT near zero
+                            let simd_mean = Simd::<f32, LANES_I8_F32_8>::splat(mean_dosage);
+                            let simd_std_dev = Simd::<f32, LANES_I8_F32_8>::splat(std_dev_dosage);
+                            let simd_missing_i8 = Simd::<i8, LANES_I8_F32_8>::splat(-127i8);
+
+                            if let (Some(raw_slice), Some(std_mut_slice)) = (raw_slice_option, std_mut_slice_option) {
+                                'simd_loop_nonzero_std_dev: while i_req_sample + LANES_I8_F32_8 <= num_samples_in_row {
+                                    let raw_i8_chunk = Simd::<i8, LANES_I8_F32_8>::from_slice(&raw_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    if raw_i8_chunk.simd_eq(simd_missing_i8).any() {
+                                        for k in 0..LANES_I8_F32_8 {
+                                            let current_idx = i_req_sample + k;
+                                            if raw_slice[current_idx] == -127i8 {
+                                                return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
+                                                                      pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[current_idx].0))) as ThreadSafeStdError);
+                                            }
+                                            // Scalar processing for this element if error handling changes:
+                                            // let standardized_val = (raw_slice[current_idx] as f32 - mean_dosage) / std_dev_dosage;
+                                            // std_mut_slice[current_idx] = standardized_val;
+                                        }
+                                        // As above, currently unreachable.
+                                        // i_req_sample += LANES_I8_F32_8;
+                                        // continue 'simd_loop_nonzero_std_dev;
+                                    }
+                                    let raw_f32_chunk: Simd<f32, LANES_I8_F32_8> = raw_i8_chunk.cast();
+                                    let standardized_chunk = (raw_f32_chunk - simd_mean) / simd_std_dev;
+                                    standardized_chunk.write_to_slice_unaligned(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    i_req_sample += LANES_I8_F32_8;
+                                }
+                            }
+                            // Scalar remainder loop (or full scalar if slices were not available)
+                            for k_sample in i_req_sample..num_samples_in_row {
+                                let raw_dosage_val_i8 = if let Some(slice) = raw_slice_option {
+                                    slice[k_sample]
+                                } else {
+                                    *raw_snp_row.uget(k_sample).expect("Remainder loop read index out of bounds for raw_snp_row")
+                                };
                                 if raw_dosage_val_i8 == -127i8 {
                                      return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
-                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[i_req_sample].0))) as ThreadSafeStdError);
+                                                          pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[k_sample].0))) as ThreadSafeStdError);
                                 }
                                 let standardized_val = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
-                                unsafe { standardized_snp_row_to_fill.uget_mut(i_req_sample).write(standardized_val); }
+                                if let Some(slice_mut) = std_mut_slice_option {
+                                    slice_mut[k_sample] = standardized_val;
+                                } else {
+                                    standardized_snp_row_to_fill.uget_mut(k_sample).expect("Remainder loop write index out of bounds for standardized_snp_row_to_fill").write(standardized_val);
+                                }
                             }
                         }
                     }
