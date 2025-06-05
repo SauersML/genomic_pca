@@ -186,13 +186,18 @@ def logistic_regression_balanced_accuracy(
     le = LabelEncoder()
     numeric_labels = le.fit_transform(subpopulation_labels)
 
-    # Unregularized Logistic Regression: penalty=None
+    # Logistic Regression with L2 regularization
+    # L2 regularization is generally robust and helps prevent overfitting.
+    # The regularization strength is controlled by C (default C=1.0).
+    # For more fine-grained control, C can be tuned using cross-validation
+    # (e.g., with LogisticRegressionCV or by wrapping this in a GridSearchCV).
     model = LogisticRegression(
-        penalty=None,  # No regularization
-        solver='lbfgs',
+        penalty='l2',  # Apply L2 regularization
+        solver='lbfgs', # 'lbfgs' supports L2 regularization
         multi_class='auto', # Automatically handles multi-class
         random_state=random_seed,
-        max_iter=300 # Increased iterations
+        max_iter=300, # Increased iterations
+        C=1.0 # Default inverse of regularization strength
     )
 
     cv_strategy = StratifiedKFold(n_splits=n_cv_splits, shuffle=True, random_state=random_seed)
