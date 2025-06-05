@@ -502,7 +502,118 @@ def main():
         print(f"    Saved stacked metrics plot: {plot_filepath}")
         plt.close(fig_param_metrics)
 
-    # 5. Plotting - Runtimes Summary (Mega-Plot)
+    # 5. Plotting - LogReg Accuracy Mega-Plot
+    print("\nGenerating logistic regression raw accuracy mega-plot...")
+    num_accuracy_subplots = len(unique_swept_eigensnp_params)
+    if num_accuracy_subplots == 0:
+        print("No swept parameters found for accuracy plot. Skipping.")
+    else:
+        fig_acc, axes_acc = plt.subplots(num_accuracy_subplots, 2,
+                                         figsize=(10, 4 * num_accuracy_subplots),
+                                         squeeze=False)
+        for idx, param_name in enumerate(unique_swept_eigensnp_params):
+            ax_left = axes_acc[idx, 0]
+            ax_right = axes_acc[idx, 1]
+
+            df_param = df_all_metrics[df_all_metrics["swept_param_name"] == param_name].copy()
+            df_param = df_param.dropna(subset=["swept_param_value_numeric", "LogReg_Balanced_Accuracy_CV"])
+
+            if df_param.empty:
+                ax_left.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_left.transAxes)
+                ax_right.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_right.transAxes)
+                continue
+
+            # ── left panel: individual superpopulations ───────────────────────────
+            for sp in sorted(df_param["superpopulation"].unique()):
+                df_sp = (df_param[df_param["superpopulation"] == sp]
+                         .sort_values("swept_param_value_numeric"))
+                line_left = ax_left.plot(df_sp["swept_param_value_numeric"],
+                                         df_sp["LogReg_Balanced_Accuracy_CV"],
+                                         marker="o",
+                                         linestyle="-",
+                                         label=sp,
+                                         markersize=4,
+                                         alpha=0.8)
+                baseline_col = "baseline_LogReg_Balanced_Accuracy_CV"
+                if sp in df_baseline_metrics_pivot.index and baseline_col in df_baseline_metrics_pivot.columns:
+                    baseline_val = df_baseline_metrics_pivot.loc[sp, baseline_col]
+                    if not pd.isna(baseline_val):
+                        xmin_val = df_sp["swept_param_value_numeric"].min()
+                        xmax_val = df_sp["swept_param_value_numeric"].max()
+                        ax_left.hlines(baseline_val,
+                                       xmin_val,
+                                       xmax_val,
+                                       linestyle="--",
+                                       alpha=0.5,
+                                       color=line_left[0].get_color())
+
+            ax_left.set_title(param_name.replace("eigensnp_", "") + " – per superpopulation")
+            ax_left.set_xlabel(param_name.replace("eigensnp_", ""))
+            ax_left.set_ylabel("Balanced Accuracy (CV)")
+            ax_left.set_ylim(0, 1)
+            ax_left.grid(True, alpha=0.5)
+            if idx == 0:
+                ax_left.legend(title="Superpopulation", fontsize="x-small", loc="best")
+
+            default_val = eigensnp_defaults.get(param_name)
+            if default_val is not None:
+                ax_left.axvline(float(default_val), color="grey", linestyle="--", linewidth=1)
+
+            # ── right panel: mean / median across superpopulations ────────────────
+            df_agg = (df_param.groupby("swept_param_value_numeric")["LogReg_Balanced_Accuracy_CV"]
+                              .agg(["mean", "median"])
+                              .reset_index()
+                              .sort_values("swept_param_value_numeric"))
+            if not df_agg.empty:
+                ax_right.plot(df_agg["swept_param_value_numeric"],
+                              df_agg["mean"],
+                              marker="s",
+                              linestyle="--",
+                              label="Mean")
+                ax_right.plot(df_agg["swept_param_value_numeric"],
+                              df_agg["median"],
+                              marker="^",
+                              linestyle=":",
+                              label="Median")
+
+            if "baseline_LogReg_Balanced_Accuracy_CV" in df_baseline_metrics_pivot.columns:
+                baseline_mean = df_baseline_metrics_pivot["baseline_LogReg_Balanced_Accuracy_CV"].mean()
+                if not pd.isna(baseline_mean) and not df_param["swept_param_value_numeric"].empty:
+                    ax_right.hlines(baseline_mean,
+                                    df_param["swept_param_value_numeric"].min(),
+                                    df_param["swept_param_value_numeric"].max(),
+                                    color="darkgray",
+                                    linestyle="-.",
+                                    alpha=0.6,
+                                    label="Mean baseline")
+
+            ax_right.set_title(param_name.replace("eigensnp_", "") + " – mean/median")
+            ax_right.set_xlabel(param_name.replace("eigensnp_", ""))
+            ax_right.set_ylabel("Balanced Accuracy (CV)")
+            ax_right.set_ylim(0, 1)
+            ax_right.grid(True, alpha=0.5)
+            if idx == 0:
+                ax_right.legend(fontsize="x-small", loc="best")
+
+            if param_name in ["eigensnp_min_maf", "eigensnp_max_hwe_p", "eigensnp_subset_factor"] and \
+               not df_param["swept_param_value_numeric"].empty and \
+               df_param["swept_param_value_numeric"].min() > 0:
+                try:
+                    ax_left.set_xscale("log")
+                    ax_right.set_xscale("log")
+                except ValueError:
+                    pass
+
+        fig_acc.suptitle("Logistic Regression Raw Balanced Accuracy vs. Swept Parameters",
+                         fontsize=20,
+                         y=0.99)
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
+        accuracy_plot_filepath = PLOTS_OUTPUT_DIR / "logreg_raw_accuracy_mega_plot.png"
+        plt.savefig(accuracy_plot_filepath)
+        print(f"  Saved logistic regression accuracy mega-plot: {accuracy_plot_filepath}")
+        plt.close(fig_acc)
+
+    # 6. Plotting - Runtimes Summary (Mega-Plot)
     print("\nGenerating runtime mega-plot...")
     num_runtime_subplots = len(unique_swept_eigensnp_params)
     if num_runtime_subplots == 0:
