@@ -129,8 +129,8 @@ def plot_color_scheme_guide(ax, population_color_map, all_pop_long_names, pca_me
     ax.set_title("Color Scheme Guide", fontsize=12, fontweight='bold', pad=15)
 
     current_y = 0.98
-    line_height_super = 0.045
-    line_height_sub = 0.030
+    line_height_super = 0.035
+    line_height_sub = 0.022
     indent_sub = 0.05
     patch_x = 0.02
     patch_width = 0.12
@@ -158,7 +158,6 @@ def plot_color_scheme_guide(ax, population_color_map, all_pop_long_names, pca_me
     sorted_superpopulations = sorted(list(relevant_superpops), key=lambda s: (s == 'OTH', s)) # OTH last
 
     for superpop_code in sorted_superpopulations:
-        if current_y < 0.05: break # Stop if out of space
 
         superpop_profile = SUPERPOP_COLOR_PROFILES.get(superpop_code, SUPERPOP_COLOR_PROFILES['OTH'])
         superpop_base_color_hex = superpop_profile[0]
@@ -167,7 +166,7 @@ def plot_color_scheme_guide(ax, population_color_map, all_pop_long_names, pca_me
                                        facecolor=superpop_base_color_hex, edgecolor='k', linewidth=0.5)
         ax.add_patch(rect_super)
         ax.text(text_x_super, current_y - line_height_super*0.8/2, superpop_code, 
-                va='center', ha='left', fontweight='bold', fontsize=8.5)
+                va='center', ha='left', fontweight='bold', fontsize=7.5)
         current_y -= line_height_super
 
         # Get populations for this superpopulation
@@ -184,7 +183,6 @@ def plot_color_scheme_guide(ax, population_color_map, all_pop_long_names, pca_me
                 pops_in_this_super.append(pop_code)
         
         for pop_code in sorted(pops_in_this_super):
-            if current_y < 0.05: break
             pop_color = population_color_map.get(pop_code, get_population_color('OTH',1,0))
             pop_display_name = f"{all_pop_long_names.get(pop_code, pop_code)} ({pop_code})"
             
@@ -192,9 +190,9 @@ def plot_color_scheme_guide(ax, population_color_map, all_pop_long_names, pca_me
                                          facecolor=pop_color, edgecolor='darkgrey', linewidth=0.3)
             ax.add_patch(rect_sub)
             ax.text(text_x_sub, current_y - line_height_sub*0.7/2, pop_display_name, 
-                    va='center', ha='left', fontsize=7)
+                    va='center', ha='left', fontsize=6.5)
             current_y -= line_height_sub
-        current_y -= line_height_sub * 0.3 # Small gap after subpopulations of a superpop
+        current_y -= line_height_sub * 0.1 # Small gap after subpopulations of a superpop
 
 
 # --- Main Script ---
