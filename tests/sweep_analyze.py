@@ -143,43 +143,61 @@ def process_single_run_metrics_worker(task_args):
         # output_dir in sweeps_summary.tsv is the absolute path to the run's folder for sweep runs
         pca_file = run_output_dir / "eigensnp_results.eigensnp.pca.tsv"
     
-    # Use a unique name for the metrics output for this specific call, stored in the run's output_dir
-    metrics_output_temp_file = run_output_dir / f"{pca_file.stem}_metrics_calc_temp.tsv"
+    # Define the path for the cached/permanent metrics file for this PCA input
+    # This file will be stored in the run's output directory.
+    metrics_output_cache_file = run_output_dir / f"{pca_file.stem}.metrics_cache.tsv"
     
     run_metrics_results = []
 
     if pca_file.exists():
-        try:
-            # Call the imported function from metrics.py
-            metrics_module.compute_metrics_for_superpopulations(
-                pca_file_path=str(pca_file),
-                sample_file_path=str(SAMPLE_FILE_METRICS),
-                number_of_pcs=METRICS_PCS_TO_USE,
-                monte_carlo_samples=METRICS_MC_SAMPLES_KDE,
-                output_tsv_path=str(metrics_output_temp_file)
-            )
-            if metrics_output_temp_file.exists():
-                df_metrics_current_run = pd.read_csv(metrics_output_temp_file, sep='\t')
-                for _, metrics_row in df_metrics_current_run.iterrows():
-                    data_point = {
-                        "run_id": run_id,
-                        "swept_param_name": run_info["swept_param_name"],
-                        "swept_param_value_str": str(run_info["swept_param_value"]), # it's string
-                        "superpopulation": metrics_row["Superpopulation"],
-                        "command": run_info.get("command", "")
-                    }
-                    for m_col in METRIC_COLUMNS_TO_ANALYZE:
-                        data_point[m_col] = metrics_row.get(m_col, np.nan)
-                    run_metrics_results.append(data_point)
-                
-                try: # Attempt to clean up the temporary metrics file
-                    os.remove(metrics_output_temp_file)
-                except OSError as e_rm:
-                    print(f"Warning: Could not remove temporary metrics file {metrics_output_temp_file}: {e_rm}")
-            else:
-                pass
-        except Exception as e:
-            pass
+        # Try to load from cache first
+        if metrics_output_cache_file.exists():
+            # print(f"INFO: Loading cached metrics from {metrics_output_cache_file} for run {run_id}")
+            try:
+                df_metrics_current_run = pd.read_csv(metrics_output_cache_file, sep='	')
+                # Proceed to populate run_metrics_results (same logic as after computation)
+            except Exception as e_read_cache:
+                print(f"WARNING: Could not read cached metrics file {metrics_output_cache_file}. Will recompute. Error: {e_read_cache}")
+                df_metrics_current_run = None # Ensure recomputation
+        else:
+            df_metrics_current_run = None # Cache file does not exist
+
+        if df_metrics_current_run is None: # If cache didn't exist or failed to load
+            # print(f"INFO: No cache found or cache read failed for {run_id}. Computing metrics and caching to {metrics_output_cache_file}")
+            try:
+                # Call the imported function from metrics.py, saving directly to the cache file path
+                metrics_module.compute_metrics_for_superpopulations(
+                    pca_file_path=str(pca_file),
+                    sample_file_path=str(SAMPLE_FILE_METRICS),
+                    number_of_pcs=METRICS_PCS_TO_USE,
+                    monte_carlo_samples=METRICS_MC_SAMPLES_KDE,
+                    output_tsv_path=str(metrics_output_cache_file) # Save directly to cache file
+                )
+                if metrics_output_cache_file.exists():
+                    df_metrics_current_run = pd.read_csv(metrics_output_cache_file, sep='	')
+                else:
+                    print(f"WARNING: Metrics script did not produce output file {metrics_output_cache_file} for run {run_id}")
+                    pass # df_metrics_current_run remains None, so no metrics will be added
+            except Exception as e_compute:
+                print(f"ERROR: Failed to compute metrics for run {run_id} and PCA file {pca_file}. Error: {e_compute}")
+                pass # df_metrics_current_run remains None
+
+        # If df_metrics_current_run is now populated (either from cache or fresh computation)
+        if df_metrics_current_run is not None:
+            for _, metrics_row in df_metrics_current_run.iterrows():
+                data_point = {
+                    "run_id": run_id,
+                    "swept_param_name": run_info["swept_param_name"],
+                    "swept_param_value_str": str(run_info["swept_param_value"]), # it's string
+                    "superpopulation": metrics_row["Superpopulation"],
+                    "command": run_info.get("command", "")
+                }
+                for m_col in METRIC_COLUMNS_TO_ANALYZE:
+                    data_point[m_col] = metrics_row.get(m_col, np.nan)
+                run_metrics_results.append(data_point)
+    else:
+        print(f"WARNING: PCA file not found for run {run_id} at {pca_file}. Skipping metrics calculation.")
+
     return run_metrics_results
 
 
@@ -270,14 +288,19 @@ def main():
 
     # 4. Plotting - Per Swept Parameter Metric Summary
     
-    # Prepare Exact PCA metrics for plotting (will contain its 'percent_better' values)
-    # This is done after all percent_better columns are calculated in df_all_metrics
+    # Prepare Exact PCA metrics for plotting.
+    # df_all_metrics already contains the raw metric values.
+    # df_baseline_metrics_pivot contains baseline raw values from the 'Base Defaults' run.
+    # The 'percent_better' calculation is kept for now in case it's used elsewhere or for other interpretations,
+    # but the Section 4 plots will be modified to show raw values.
     df_all_metrics_with_baselines = pd.merge(df_all_metrics, df_baseline_metrics_pivot, on="superpopulation", how="left")
     for metric_key_for_pct in METRIC_COLUMNS_TO_ANALYZE: # Calculate percent better for all, including exact PCA
         metric_props_for_pct = METRIC_PROPERTIES.get(metric_key_for_pct, {"higher_is_better": True})
         df_all_metrics_with_baselines[f"percent_better_{metric_key_for_pct}"] = df_all_metrics_with_baselines.apply(
             lambda row: calculate_percent_better(row.get(metric_key_for_pct), row.get(f"baseline_{metric_key_for_pct}"), metric_props_for_pct["higher_is_better"]), axis=1
         )
+    # df_exact_pca_metrics will contain raw metric values and percent_better values for the Exact PCA run.
+    # For plotting raw Exact PCA values, we will directly use the raw metric columns from this.
     df_exact_pca_metrics = df_all_metrics_with_baselines[df_all_metrics_with_baselines["swept_param_name"] == EXACT_PCA_DISPLAY_NAME].copy()
 
 
@@ -304,7 +327,6 @@ def main():
         else:
             df_plot_data_for_sweep = df_current_sweep
         
-        df_plot_data_for_sweep = pd.merge(df_plot_data_for_sweep, df_baseline_metrics_pivot, on="superpopulation", how="left")
 
         num_metrics_to_plot = len(METRIC_COLUMNS_TO_ANALYZE)
         fig_param_metrics, axes_param_metrics = plt.subplots(num_metrics_to_plot, 2, 
@@ -316,24 +338,27 @@ def main():
             ax_right = axes_param_metrics[metric_idx, 1]
             metric_props = METRIC_PROPERTIES.get(metric_key, {"higher_is_better": True, "name": metric_key})
     
-            df_current_sweep_with_pct_better = df_all_metrics_with_baselines[df_all_metrics_with_baselines["swept_param_name"] == eigensnp_param_name].copy()
+            # Use raw metric values for plotting from df_all_metrics.
+            # The 'Base Defaults' run is added to ensure the default parameter value is plotted if not already swept.
+            df_current_sweep_raw_metrics = df_all_metrics[df_all_metrics["swept_param_name"] == eigensnp_param_name].copy()
             
-            base_run_to_add_with_pct_better = df_all_metrics_with_baselines[
-                df_all_metrics_with_baselines["swept_param_name"].str.contains("Base Defaults", na=False)
+            base_run_to_add_raw_metrics = df_all_metrics[
+                df_all_metrics["swept_param_name"].str.contains("Base Defaults", na=False)
             ].copy()
 
             if default_value_for_this_param is not None:
-                base_run_to_add_with_pct_better["swept_param_value_numeric"] = float(default_value_for_this_param)
-                base_run_to_add_with_pct_better["swept_param_name"] = eigensnp_param_name
-                is_default_already_swept_in_current = default_value_for_this_param in df_current_sweep_with_pct_better["swept_param_value_numeric"].unique()
-                df_plot_data_for_sweep_final = pd.concat([df_current_sweep_with_pct_better, base_run_to_add_with_pct_better if not is_default_already_swept_in_current else pd.DataFrame()], ignore_index=True)
+                base_run_to_add_raw_metrics["swept_param_value_numeric"] = float(default_value_for_this_param)
+                base_run_to_add_raw_metrics["swept_param_name"] = eigensnp_param_name # Mark as part of this sweep
+                is_default_already_swept_in_current = default_value_for_this_param in df_current_sweep_raw_metrics["swept_param_value_numeric"].unique()
+                df_plot_data_for_sweep_final = pd.concat([df_current_sweep_raw_metrics, base_run_to_add_raw_metrics if not is_default_already_swept_in_current else pd.DataFrame()], ignore_index=True)
             else:
-                df_plot_data_for_sweep_final = df_current_sweep_with_pct_better
+                df_plot_data_for_sweep_final = df_current_sweep_raw_metrics
 
-            df_plot_ready = df_plot_data_for_sweep_final.dropna(subset=[f"percent_better_{metric_key}", "swept_param_value_numeric"])
+            # Ensure we are plotting raw metrics, not percent_better
+            df_plot_ready = df_plot_data_for_sweep_final.dropna(subset=[metric_key, "swept_param_value_numeric"])
 
-
-            if df_plot_ready.empty and df_exact_pca_metrics[pd.notna(df_exact_pca_metrics[f"percent_better_{metric_key})"])].empty : # Check both swept and exact
+            # Check if there is data for the raw metric for swept runs or for Exact PCA raw metric
+            if df_plot_ready.empty and df_exact_pca_metrics[pd.notna(df_exact_pca_metrics[metric_key])].empty:
                 ax_left.text(0.5, 0.5, "No data for this metric/sweep", ha='center', va='center', transform=ax_left.transAxes)
                 ax_right.text(0.5, 0.5, "No data for this metric/sweep", ha='center', va='center', transform=ax_right.transAxes)
                 ax_left.set_title(f"{metric_props['name']}\nPer Superpopulation")
@@ -345,54 +370,58 @@ def main():
                          ax_common.set_xlabel(eigensnp_param_name.replace("eigensnp_", ""))
                 continue
 
-            # Left Subplot: Plot swept data first
-            ax_left.set_ylabel("Improvement vs Baseline (%)")
+            # Left Subplot: Plot swept data first (raw metric values)
+            ax_left.set_ylabel(metric_props['name']) # Use raw metric name for y-axis
             ax_left.set_title(f"{metric_props['name']}\nPer Superpopulation")
-            superpopulation_colors = {} # Initialize color mapping for the current metric's superpopulation lines
+            superpopulation_colors = {}
             if not df_plot_ready.empty:
                 for superpop_label in sorted(df_plot_ready["superpopulation"].unique()):
                     df_superpop_plot = df_plot_ready[df_plot_ready["superpopulation"] == superpop_label].sort_values("swept_param_value_numeric")
-                    # Plot the main line for the superpopulation
-                    line = ax_left.plot(df_superpop_plot["swept_param_value_numeric"], df_superpop_plot[f"percent_better_{metric_key}"], marker='o', linestyle='-', label=superpop_label, markersize=5, alpha=0.8)
-                    # Store the color used for this superpopulation to apply to its corresponding Exact PCA line
+                    # Plot the main line for the superpopulation using the raw metric_key
+                    line = ax_left.plot(df_superpop_plot["swept_param_value_numeric"], df_superpop_plot[metric_key], marker='o', linestyle='-', label=superpop_label, markersize=5, alpha=0.8)
                     if superpop_label not in superpopulation_colors:
                         superpopulation_colors[superpop_label] = line[0].get_color()
             
-            # Determine Y-limits for ax_left based on swept data
-            y_min_swept_left, y_max_swept_left = (np.nan, np.nan)
+            # Determine Y-limits for ax_left based on raw swept data and raw Exact PCA data
+            all_y_values_for_lim_left = []
             if not df_plot_ready.empty:
-                all_y_values_swept_left = df_plot_ready[f"percent_better_{metric_key}"].dropna().values
-                if len(all_y_values_swept_left) > 0:
-                    y_min_swept_left = np.nanmin(all_y_values_swept_left)
-                    y_max_swept_left = np.nanmax(all_y_values_swept_left)
+                all_y_values_for_lim_left.extend(df_plot_ready[metric_key].dropna().values)
             
-            if pd.notna(y_min_swept_left) and pd.notna(y_max_swept_left):
-                y_range_swept_left = y_max_swept_left - y_min_swept_left
-                padding_left = y_range_swept_left * 0.05 if y_range_swept_left > 1e-9 else 1.0 
-                final_y_min_left = y_min_swept_left - padding_left
-                final_y_max_left = y_max_swept_left + padding_left
+            # Include Exact PCA raw values in y-limit calculation for the left plot
+            relevant_exact_pca_raw_metric = df_exact_pca_metrics[pd.notna(df_exact_pca_metrics[metric_key])].copy()
+            if not relevant_exact_pca_raw_metric.empty:
+                 all_y_values_for_lim_left.extend(relevant_exact_pca_raw_metric[metric_key].dropna().values)
+
+            y_min_left, y_max_left = (np.nan, np.nan)
+            if all_y_values_for_lim_left: # Check if list is not empty
+                y_min_left = np.nanmin(all_y_values_for_lim_left)
+                y_max_left = np.nanmax(all_y_values_for_lim_left)
+
+            if pd.notna(y_min_left) and pd.notna(y_max_left):
+                y_range_left = y_max_left - y_min_left
+                padding_left = y_range_left * 0.05 if y_range_left > 1e-9 else 1.0
+                final_y_min_left = y_min_left - padding_left
+                final_y_max_left = y_max_left + padding_left
                 ax_left.set_ylim(final_y_min_left, final_y_max_left)
-            else: # Fallback if no swept data or only NaNs
-                ax_left.set_ylim(-100, 100) # Default reasonable range if no data to scale from
+            elif metric_key == "LogReg_Balanced_Accuracy_CV": # Specific default for accuracy
+                 ax_left.set_ylim(0, 1.05)
+            # Add other metric-specific default y-limits if necessary
 
-            y_plot_min_left, y_plot_max_left = ax_left.get_ylim() # Get final limits for capping Exact PCA
+            y_plot_min_left, y_plot_max_left = ax_left.get_ylim()
 
-            # Left Subplot: Plot Exact PCA reference lines
-            relevant_exact_pca_for_metric = df_exact_pca_metrics[pd.notna(df_exact_pca_metrics[f"percent_better_{metric_key}"])].copy()
-            # The variable exact_pca_legend_added_ax_left is no longer needed as specific legend for these lines is removed.
-            if not relevant_exact_pca_for_metric.empty:
-                for _, exact_row in relevant_exact_pca_for_metric.iterrows():
-                    exact_val = exact_row[f"percent_better_{metric_key}"]
+            # Left Subplot: Plot Exact PCA raw metric reference lines
+            # relevant_exact_pca_for_metric was already defined above with raw metric check
+            if not relevant_exact_pca_raw_metric.empty:
+                # Use a distinct color for all Exact PCA reference lines within this metric's subplot
+                exact_pca_ref_color = 'darkred'
+                exact_pca_legend_added = False
+                for _, exact_row in relevant_exact_pca_raw_metric.iterrows():
+                    exact_val = exact_row[metric_key] # Use raw metric value
                     superpop_of_exact = exact_row["superpopulation"]
                     
-                    # Get the color used for this superpopulation in the main swept data plot.
-                    # Fallback to 'dimgray' if the superpopulation was not in the swept data (e.g., only in Exact PCA).
-                    line_color = superpopulation_colors.get(superpop_of_exact, 'dimgray')
-                                       
                     plot_y = exact_val
-                    marker_char = None # For indicating values capped at plot limits
+                    marker_char = None
                     
-                    # Cap the plotted y-value and set marker if it's outside the current y-limits
                     if exact_val > y_plot_max_left:
                         plot_y = y_plot_max_left
                         marker_char = '^'
@@ -400,48 +429,61 @@ def main():
                         plot_y = y_plot_min_left
                         marker_char = 'v'
                     
-                    # Plot the horizontal line for Exact PCA.
-                    # Style: Use the superpopulation's color, make it dotted, and transparent.
-                    # No separate legend entry (label="_nolegend_") as these lines are now styled variants of main superpopulation lines.
-                    ax_left.axhline(y=plot_y, color=line_color, linestyle=':', linewidth=1.5, alpha=0.6, label="_nolegend_")
+                    # For individual superpopulation Exact PCA lines, make them subtle, e.g., same color as swept line but different style
+                    # Or use a single color for all Exact PCA lines with a legend entry.
+                    # Let's use the superpopulation color with a distinct style for its exact PCA value.
+                    line_color_for_exact_pca_sp = superpopulation_colors.get(superpop_of_exact, 'dimgray')
+
+                    ax_left.axhline(y=plot_y, color=line_color_for_exact_pca_sp, linestyle=':', linewidth=1.5, alpha=0.7,
+                                    label=f"{superpop_of_exact} (Exact PCA)" if superpop_of_exact not in ax_left.get_legend_handles_labels()[1] else "_nolegend_")
                     
                     if marker_char:
-                        # If a marker is used (value capped), it should also use the superpopulation-specific color.
-                        ax_left.plot(ax_left.get_xlim()[1] * 0.98, plot_y, marker=marker_char, color=line_color, markersize=7, clip_on=False, linestyle='None')
+                        ax_left.plot(ax_left.get_xlim()[1] * 0.98, plot_y, marker=marker_char, color=line_color_for_exact_pca_sp, markersize=7, clip_on=False, linestyle='None')
 
-            # Right Subplot: Plot swept data aggregates first
+            # Right Subplot: Plot swept data aggregates (raw metric values)
             ax_right.set_title(f"{metric_props['name']}\nAggregated (Mean/Median)")
-            df_agg = pd.DataFrame() # ensure df_agg is defined
+            ax_right.set_ylabel(metric_props['name']) # Use raw metric name for y-axis
+            df_agg = pd.DataFrame()
             if not df_plot_ready.empty:
-                df_agg = df_plot_ready.groupby("swept_param_value_numeric")[f"percent_better_{metric_key}"].agg(['mean', 'median']).reset_index().sort_values("swept_param_value_numeric")
+                df_agg = df_plot_ready.groupby("swept_param_value_numeric")[metric_key].agg(['mean', 'median']).reset_index().sort_values("swept_param_value_numeric")
                 if not df_agg.empty:
                     ax_right.plot(df_agg["swept_param_value_numeric"], df_agg["mean"], marker='s', linestyle='--', label="Mean (Swept)")
                     ax_right.plot(df_agg["swept_param_value_numeric"], df_agg["median"], marker='^', linestyle=':', label="Median (Swept)")
 
-            # Determine Y-limits for ax_right based on swept aggregate data
-            y_min_swept_right, y_max_swept_right = (np.nan, np.nan)
+            # Determine Y-limits for ax_right based on raw swept aggregate data and raw Exact PCA aggregate data
+            all_y_values_for_lim_right = []
             if not df_agg.empty:
-                all_y_values_swept_right = pd.concat([df_agg['mean'], df_agg['median']]).dropna().values
-                if len(all_y_values_swept_right) > 0:
-                    y_min_swept_right = np.nanmin(all_y_values_swept_right)
-                    y_max_swept_right = np.nanmax(all_y_values_swept_right)
+                all_y_values_for_lim_right.extend(pd.concat([df_agg['mean'], df_agg['median']]).dropna().values)
 
-            if pd.notna(y_min_swept_right) and pd.notna(y_max_swept_right):
-                y_range_swept_right = y_max_swept_right - y_min_swept_right
-                padding_right = y_range_swept_right * 0.05 if y_range_swept_right > 1e-9 else 1.0
-                final_y_min_right = y_min_swept_right - padding_right
-                final_y_max_right = y_max_swept_right + padding_right
+            # Include Exact PCA aggregate raw values in y-limit calculation for the right plot
+            if not relevant_exact_pca_raw_metric.empty:
+                exact_mean_val_raw = relevant_exact_pca_raw_metric[metric_key].mean()
+                exact_median_val_raw = relevant_exact_pca_raw_metric[metric_key].median()
+                if pd.notna(exact_mean_val_raw): all_y_values_for_lim_right.append(exact_mean_val_raw)
+                if pd.notna(exact_median_val_raw): all_y_values_for_lim_right.append(exact_median_val_raw)
+
+            y_min_right, y_max_right = (np.nan, np.nan)
+            if all_y_values_for_lim_right:
+                y_min_right = np.nanmin(all_y_values_for_lim_right)
+                y_max_right = np.nanmax(all_y_values_for_lim_right)
+
+            if pd.notna(y_min_right) and pd.notna(y_max_right):
+                y_range_right = y_max_right - y_min_right
+                padding_right = y_range_right * 0.05 if y_range_right > 1e-9 else 1.0
+                final_y_min_right = y_min_right - padding_right
+                final_y_max_right = y_max_right + padding_right
                 ax_right.set_ylim(final_y_min_right, final_y_max_right)
-            elif not df_plot_ready.empty: # If df_agg was empty but df_plot_ready was not, try to use ax_left's limits
+            elif not df_plot_ready.empty and pd.notna(y_min_left) and pd.notna(y_max_left): # Fallback to left plot's limits if sensible
                  ax_right.set_ylim(y_plot_min_left, y_plot_max_left)
-            else: # Fallback
-                ax_right.set_ylim(-100, 100)
+            elif metric_key == "LogReg_Balanced_Accuracy_CV": # Specific default for accuracy
+                 ax_right.set_ylim(0, 1.05)
+            # Add other metric-specific default y-limits if necessary
             
             y_plot_min_right, y_plot_max_right = ax_right.get_ylim()
 
-            # Right Subplot: Plot Exact PCA aggregate lines
-            if not relevant_exact_pca_for_metric.empty:
-                exact_mean_val = relevant_exact_pca_for_metric[f"percent_better_{metric_key}"].mean()
+            # Right Subplot: Plot Exact PCA aggregate raw metric lines
+            if not relevant_exact_pca_raw_metric.empty: # Use the previously defined relevant_exact_pca_raw_metric
+                exact_mean_val = relevant_exact_pca_raw_metric[metric_key].mean() # Raw mean
                 if pd.notna(exact_mean_val):
                     plot_y_exact_mean = exact_mean_val
                     marker_char_exact_mean = None
@@ -451,11 +493,11 @@ def main():
                     elif exact_mean_val < y_plot_min_right:
                         plot_y_exact_mean = y_plot_min_right
                         marker_char_exact_mean = 'v'
-                    ax_right.axhline(y=plot_y_exact_mean, color='purple', linestyle='-.', linewidth=1.5, label=f"{EXACT_PCA_DISPLAY_NAME} (Mean)")
+                    ax_right.axhline(y=plot_y_exact_mean, color='purple', linestyle='-.', linewidth=2, label=f"{EXACT_PCA_DISPLAY_NAME} (Mean)")
                     if marker_char_exact_mean:
                         ax_right.plot(ax_right.get_xlim()[1] * 0.98, plot_y_exact_mean, marker=marker_char_exact_mean, color='purple', markersize=7, clip_on=False, linestyle='None')
 
-                exact_median_val = relevant_exact_pca_for_metric[f"percent_better_{metric_key}"].median()
+                exact_median_val = relevant_exact_pca_raw_metric[metric_key].median() # Raw median
                 if pd.notna(exact_median_val):
                     plot_y_exact_median = exact_median_val
                     marker_char_exact_median = None
@@ -465,7 +507,7 @@ def main():
                     elif exact_median_val < y_plot_min_right:
                         plot_y_exact_median = y_plot_min_right
                         marker_char_exact_median = 'v'
-                    ax_right.axhline(y=plot_y_exact_median, color='darkviolet', linestyle=':', linewidth=1.5, label=f"{EXACT_PCA_DISPLAY_NAME} (Median)")
+                    ax_right.axhline(y=plot_y_exact_median, color='darkviolet', linestyle=':', linewidth=2, label=f"{EXACT_PCA_DISPLAY_NAME} (Median)")
                     if marker_char_exact_median:
                         ax_right.plot(ax_right.get_xlim()[1] * 0.98, plot_y_exact_median, marker=marker_char_exact_median, color='darkviolet', markersize=7, clip_on=False, linestyle='None')
             
@@ -524,6 +566,13 @@ def main():
                 continue
 
             # ── left panel: individual superpopulations ───────────────────────────
+            # Store x-axis range for horizontal lines
+            all_swept_values_param = df_param["swept_param_value_numeric"].dropna()
+            xmin_global, xmax_global = (all_swept_values_param.min(), all_swept_values_param.max()) if not all_swept_values_param.empty else (None, None)
+
+            # For adding a single legend entry for all Exact PCA lines on the left panel
+            exact_pca_legend_added_left = False
+
             for sp in sorted(df_param["superpopulation"].unique()):
                 df_sp = (df_param[df_param["superpopulation"] == sp]
                          .sort_values("swept_param_value_numeric"))
@@ -534,18 +583,27 @@ def main():
                                          label=sp,
                                          markersize=4,
                                          alpha=0.8)
-                baseline_col = "baseline_LogReg_Balanced_Accuracy_CV"
-                if sp in df_baseline_metrics_pivot.index and baseline_col in df_baseline_metrics_pivot.columns:
-                    baseline_val = df_baseline_metrics_pivot.loc[sp, baseline_col]
-                    if not pd.isna(baseline_val):
-                        xmin_val = df_sp["swept_param_value_numeric"].min()
-                        xmax_val = df_sp["swept_param_value_numeric"].max()
-                        ax_left.hlines(baseline_val,
-                                       xmin_val,
-                                       xmax_val,
-                                       linestyle="--",
-                                       alpha=0.5,
-                                       color=line_left[0].get_color())
+
+                # Add horizontal line for Exact PCA reference for this superpopulation
+                exact_pca_sp_acc_series = df_exact_pca_metrics[
+                    (df_exact_pca_metrics["superpopulation"] == sp)
+                ]["LogReg_Balanced_Accuracy_CV"]
+
+                if not exact_pca_sp_acc_series.empty and pd.notna(exact_pca_sp_acc_series.iloc[0]):
+                    exact_pca_val = exact_pca_sp_acc_series.iloc[0]
+                    if xmin_global is not None and xmax_global is not None:
+                        current_label = f"{EXACT_PCA_DISPLAY_NAME}" if not exact_pca_legend_added_left else "_nolegend_"
+                        ax_left.hlines(exact_pca_val,
+                                       xmin_global,
+                                       xmax_global,
+                                       linestyle=":", # Using dotted for Exact PCA ref
+                                       alpha=0.7,
+                                       color=line_left[0].get_color(), # Match color of the superpopulation
+                                       label=current_label,
+                                       linewidth=1.5)
+                        if not exact_pca_legend_added_left:
+                            exact_pca_legend_added_left = True
+
 
             ax_left.set_title(param_name.replace("eigensnp_", "") + " – per superpopulation")
             ax_left.set_xlabel(param_name.replace("eigensnp_", ""))
@@ -569,23 +627,36 @@ def main():
                               df_agg["mean"],
                               marker="s",
                               linestyle="--",
-                              label="Mean")
+                              label="Mean (Swept)") # Clarify this is for swept data
                 ax_right.plot(df_agg["swept_param_value_numeric"],
                               df_agg["median"],
                               marker="^",
                               linestyle=":",
-                              label="Median")
+                              label="Median (Swept)") # Clarify this is for swept data
 
-            if "baseline_LogReg_Balanced_Accuracy_CV" in df_baseline_metrics_pivot.columns:
-                baseline_mean = df_baseline_metrics_pivot["baseline_LogReg_Balanced_Accuracy_CV"].mean()
-                if not pd.isna(baseline_mean) and not df_param["swept_param_value_numeric"].empty:
-                    ax_right.hlines(baseline_mean,
-                                    df_param["swept_param_value_numeric"].min(),
-                                    df_param["swept_param_value_numeric"].max(),
-                                    color="darkgray",
-                                    linestyle="-.",
-                                    alpha=0.6,
-                                    label="Mean baseline")
+            # Add horizontal lines for Exact PCA mean/median LogReg Balanced Accuracy
+            exact_pca_logreg_overall_mean = df_exact_pca_metrics["LogReg_Balanced_Accuracy_CV"].mean()
+            exact_pca_logreg_overall_median = df_exact_pca_metrics["LogReg_Balanced_Accuracy_CV"].median()
+
+            if pd.notna(exact_pca_logreg_overall_mean) and xmin_global is not None and xmax_global is not None:
+                ax_right.hlines(exact_pca_logreg_overall_mean,
+                                xmin_global,
+                                xmax_global,
+                                color="purple", # Consistent color for Exact PCA Mean
+                                linestyle="-.",
+                                alpha=0.8,
+                                linewidth=1.5,
+                                label=f"{EXACT_PCA_DISPLAY_NAME} (Mean)")
+
+            if pd.notna(exact_pca_logreg_overall_median) and xmin_global is not None and xmax_global is not None:
+                ax_right.hlines(exact_pca_logreg_overall_median,
+                                xmin_global,
+                                xmax_global,
+                                color="darkviolet", # Consistent color for Exact PCA Median
+                                linestyle=":",
+                                alpha=0.8,
+                                linewidth=1.5,
+                                label=f"{EXACT_PCA_DISPLAY_NAME} (Median)")
 
             ax_right.set_title(param_name.replace("eigensnp_", "") + " – mean/median")
             ax_right.set_xlabel(param_name.replace("eigensnp_", ""))
