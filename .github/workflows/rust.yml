@@ -29,7 +29,7 @@ jobs:
         
       - name: Install Rust toolchain
         id: install_rust
-        uses: dtolnay/rust-toolchain@stable
+    - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
           
