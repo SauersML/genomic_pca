@@ -1,3 +1,8 @@
+# cargo build --profile profiling-generate --features openblas-faer
+# then run ./target/release/genomic_pca
+# llvm-profdata merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data
+# cargo build --profile profiling-use --features openblas-faer
+
 [build]
 rustflags = ["-C", "target-cpu=native"]
 
