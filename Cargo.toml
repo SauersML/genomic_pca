@@ -73,15 +73,3 @@ mkl-faer = ["ndarray-linalg/intel-mkl-static", "efficient_pca/backend_faer"]
 # Utility features
 jemalloc = ["efficient_pca/jemalloc"]
 eigensnp-diagnostics = ["efficient_pca/enable-eigensnp-diagnostics", "dep:serde_json"]
-
-[profile.release]
-lto = true
-codegen-units = 1
-panic = 'abort'
-strip = true
-opt-level = 3
-
-[profile.profiling]
-inherits = "release"
-debug = true
-strip = false
