@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError};
 use thiserror::Error;
 use std::simd::Simd; use std::simd::prelude::{SimdPartialEq, SimdFloat, SimdInt};
+use std::simd::num::SimdUint;
 
 // SIMD Lane constants
 // For i8 to f32 conversions and operations (e.g., standardization)
@@ -1927,7 +1928,9 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                         // i_req_sample += LANES_I8_F32_8;
                                         // continue 'simd_loop_zero_std_dev;
                                     }
-                                    simd_zeros.write_to_slice(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    let sub_slice = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
+                                    let array_ref: &mut [f32; LANES_I8_F32_8] = sub_slice.try_into().expect("Slice segment has incorrect length for SIMD write");
+                                    simd_zeros.write_to_slice(array_ref);
                                     i_req_sample += LANES_I8_F32_8;
                                 }
                             }
@@ -1973,7 +1976,9 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     }
                                     let raw_f32_chunk: Simd<f32, LANES_I8_F32_8> = raw_i8_chunk.cast();
                                     let standardized_chunk = (raw_f32_chunk - simd_mean) / simd_std_dev;
-                                    standardized_chunk.write_to_slice(&mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8]);
+                                    let sub_slice = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
+                                    let array_ref: &mut [f32; LANES_I8_F32_8] = sub_slice.try_into().expect("Slice segment has incorrect length for SIMD write");
+                                    standardized_chunk.write_to_slice(array_ref);
                                     i_req_sample += LANES_I8_F32_8;
                                 }
                             }
@@ -1990,7 +1995,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                 }
                                 let standardized_val = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
                                 if let Some(slice_mut) = std_mut_slice_option {
-                                    slice_mut[k_sample] = standardized_val;
+                                    slice_mut[k_sample].write(standardized_val);
                                 } else {
                                     standardized_snp_row_to_fill.uget_mut(k_sample).write(standardized_val);
                                 }
