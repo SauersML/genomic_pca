@@ -9,7 +9,6 @@ use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError};
 use thiserror::Error;
-// use std::simd::Simd; use std::simd::prelude::{SimdPartialEq, SimdFloat, SimdInt};
 use std::simd::num::SimdUint;
 
 // SIMD Lane constants
@@ -144,8 +143,6 @@ struct IntermediateSnpDetails {
     original_m_idx: usize, // Index in the initial M_initial SNPs from .bim file
     chromosome: String,
     bp_position: i32,
-    // allele1: String, // Removed due to dead_code warning
-    // allele2: String, // Removed due to dead_code warning
     mean_allele1_dosage: Option<f32>,
     std_dev_allele1_dosage: Option<f32>,
 }
@@ -254,9 +251,6 @@ mod io_service_infrastructure {
     pub(crate) const CONTROLLER_ADJUSTMENT_INTERVAL: Duration = Duration::from_millis(750);
     pub(crate) const CONTROLLER_THROUGHPUT_HISTORY_WINDOW_DURATION: Duration = Duration::from_secs(8); // e.g. ~10x adjustment interval
     pub(crate) const TARGET_QUEUE_LENGTH_PER_ACTOR: usize = 3;
-    // pub(crate) const MAX_ACCEPTABLE_AVG_TASK_TIME_US: u64 = 150_000; // 150ms as a soft upper limit for "typical" tasks // Removed due to dead_code
-    // pub(crate) const MIN_THROUGHPUT_IMPROVEMENT_RATIO_FOR_SCALING_UP: f64 = 0.05; // Removed due to dead_code
-    // pub(crate) const MAX_THROUGHPUT_DROP_RATIO_FOR_SCALING_DOWN_REVERSAL: f64 = 0.1; // Removed due to dead_code
     pub(crate) const ACTOR_SCALING_STEP_SIZE: usize = 1;
     pub(crate) const CONTROLLER_SCALING_COOLDOWN_PERIOD: Duration = Duration::from_millis(2000);
 
@@ -630,7 +624,7 @@ mod io_service_infrastructure {
                                 .sid_index(original_m_indices_isize.as_slice()) // Pass the chunk of SIDs
                                 .iid_index(qc_sample_indices_slice)
                                 .i8() // Output as i8, suitable for dosage
-                                .c()  // Request C-order: (samples x SNPs_in_chunk)
+                                .f()  // Request F-order: (SNPs_in_chunk x samples), where SNPs are rows and contiguous
                                 .count_a1() // Standard allele counting
                                 .num_threads(0) // Allow bed-reader to use its internal default Rayon parallelism
                                 .read(&mut bed_reader_instance);
@@ -1173,23 +1167,26 @@ impl MicroarrayDataPreparer {
                 }) => {
                     match raw_genotypes_i8_chunk_result {
                         Ok(genotypes_for_chunk_samples_x_snps) => {
-                            // genotypes_for_chunk_samples_x_snps is Array2<i8> (samples x SNPs_in_this_io_chunk)
+                            // genotypes_for_chunk_samples_x_snps is Array2<i8> (samples x SNPs after bed_reader F-order read)
+                            // Iterate by Axis(1) for SNPs. Each column is a SNP and is contiguous due to F-order.
                             // Verify dimensions as a sanity check.
-                            if genotypes_for_chunk_samples_x_snps.ncols() != original_m_indices_in_chunk.len() {
-                                 warn!("SNP QC (I/O chunk {}): Received data for {} SNPs, but original_m_indices_in_chunk indicates {}. Mismatch, skipping this chunk.",
-                                       io_chunk_idx, genotypes_for_chunk_samples_x_snps.ncols(), original_m_indices_in_chunk.len());
+                            // Number of rows should be num_qc_samples
+                            if genotypes_for_chunk_samples_x_snps.nrows() != num_qc_samples {
+                                warn!("SNP QC (I/O chunk {}): Received data for {} samples (rows), but num_qc_samples indicates {}. Mismatch, skipping this chunk.",
+                                       io_chunk_idx, genotypes_for_chunk_samples_x_snps.nrows(), num_qc_samples);
                                  continue; // Skip to the next I/O chunk
                             }
-                            if num_qc_samples > 0 && genotypes_for_chunk_samples_x_snps.nrows() != num_qc_samples {
-                                warn!("SNP QC (I/O chunk {}): Received data for {} samples, but expected {}. Mismatch, skipping this chunk.",
-                                       io_chunk_idx, genotypes_for_chunk_samples_x_snps.nrows(), num_qc_samples);
+                            // Number of columns should be number of SNPs in the chunk
+                            if genotypes_for_chunk_samples_x_snps.ncols() != original_m_indices_in_chunk.len() {
+                                warn!("SNP QC (I/O chunk {}): Received data for {} SNPs (columns), but original_m_indices_in_chunk indicates {}. Mismatch, skipping this chunk.",
+                                       io_chunk_idx, genotypes_for_chunk_samples_x_snps.ncols(), original_m_indices_in_chunk.len());
                                  continue; // Skip to the next I/O chunk
                             }
 
                             // Parallelize QC over SNPs within this fetched chunk using Rayon.
                             let qc_results_for_this_io_chunk: Vec<IntermediateSnpDetails> =
                                 genotypes_for_chunk_samples_x_snps
-                                    .axis_iter(ndarray::Axis(1)) // Iterate over columns (each column is one SNP's data for all samples)
+                                    .axis_iter(ndarray::Axis(1)) // Iterate over columns (each column is one SNP's data for all samples, contiguous with F-order)
                                     .into_par_iter() // Parallelize SNP processing with Rayon
                                     .enumerate() // To get the column index within this specific chunk
                                     .filter_map(|(col_idx_in_io_chunk, snp_column_data_arrayview1)| {
@@ -1200,6 +1197,7 @@ impl MicroarrayDataPreparer {
                                             Some(slice) => slice,
                                             None => {
                                                 warn!("SNP QC (idx {}): SNP column data is not contiguous. Skipping.", original_m_idx);
+                                                warn!("SNP QC (idx {}): SNP column data is not contiguous. Skipping.", original_m_idx);
                                                 return None;
                                             }
                                         };
@@ -1208,8 +1206,10 @@ impl MicroarrayDataPreparer {
                                             return None; // No data to process
                                         }
                                         // This check was already here and is correct.
+                                        // For F-order (SNPs x Samples) read into an ndarray (Samples x SNPs)
+                                        // each column (SNP) will have num_qc_samples elements.
                                         if num_qc_samples > 0 && num_samples_total != num_qc_samples {
-                                             warn!("SNP QC (idx {}): Genotype array view length ({}) within chunk does not match num_qc_samples ({}). Skipping.",
+                                             warn!("SNP QC (idx {}): SNP data slice length ({}) for a column does not match num_qc_samples ({}). Skipping.",
                                                    original_m_idx, num_samples_total, num_qc_samples);
                                              return None;
                                         }
@@ -1315,7 +1315,6 @@ impl MicroarrayDataPreparer {
 
                                         // --- Pass 2: Calculate Sum of Squared Differences (SoS) for variance ---
                                         let mut sum_sq_diff_f64_scalar_pass2: f64 = 0.0;
-                                        // Removed: let mean_simd_f64 = Simd::<f64, ACTUAL_LANES_F64>::splat(mean_allele1_dosage_f64);
 
                                         i = 0; // Reset i for Pass 2
                                         while i + ACTUAL_LANES_I8 <= num_samples_total {
@@ -1943,7 +1942,6 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
                                                           pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[k_sample].0))) as ThreadSafeStdError);
                                 }
-                                // Removed the if let Some(slice_mut) = std_mut_slice_option check
                                 unsafe { standardized_snp_row_to_fill.uget_mut(k_sample).write(0.0f32); }
                             }
                         } else { // std_dev_dosage is NOT near zero
@@ -2012,7 +2010,6 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                                           pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[k_sample].0))) as ThreadSafeStdError);
                                 }
                                 let standardized_val = (raw_dosage_val_i8 as f32).mul_add(recip_std_dev_val, b_term_val);
-                                // Removed the if let Some(slice_mut) = std_mut_slice_option check
                                 unsafe { standardized_snp_row_to_fill.uget_mut(k_sample).write(standardized_val); }
                             }
                         }
