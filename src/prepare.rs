@@ -1928,9 +1928,14 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                         // i_req_sample += LANES_I8_F32_8;
                                         // continue 'simd_loop_zero_std_dev;
                                     }
-                                    let sub_slice = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
-                                    let array_ref: &mut [f32; LANES_I8_F32_8] = sub_slice.try_into().expect("Slice segment has incorrect length for SIMD write");
-                                    simd_zeros.write_to_slice(array_ref);
+                                    let target_slice: &mut [std::mem::MaybeUninit<f32>] = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
+                                    unsafe {
+                                        let initialized_slice = std::slice::from_raw_parts_mut(
+                                            target_slice.as_mut_ptr() as *mut f32,
+                                            LANES_I8_F32_8
+                                        );
+                                        simd_zeros.write_to_slice_unaligned(initialized_slice);
+                                    }
                                     i_req_sample += LANES_I8_F32_8;
                                 }
                             }
@@ -1976,9 +1981,14 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     }
                                     let raw_f32_chunk: Simd<f32, LANES_I8_F32_8> = raw_i8_chunk.cast();
                                     let standardized_chunk = (raw_f32_chunk - simd_mean) / simd_std_dev;
-                                    let sub_slice = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
-                                    let array_ref: &mut [f32; LANES_I8_F32_8] = sub_slice.try_into().expect("Slice segment has incorrect length for SIMD write");
-                                    standardized_chunk.write_to_slice(array_ref);
+                                    let target_slice: &mut [std::mem::MaybeUninit<f32>] = &mut std_mut_slice[i_req_sample..i_req_sample + LANES_I8_F32_8];
+                                    unsafe {
+                                        let initialized_slice = std::slice::from_raw_parts_mut(
+                                            target_slice.as_mut_ptr() as *mut f32,
+                                            LANES_I8_F32_8
+                                        );
+                                        standardized_chunk.write_to_slice_unaligned(initialized_slice);
+                                    }
                                     i_req_sample += LANES_I8_F32_8;
                                 }
                             }
