@@ -1,6 +1,4 @@
 cargo-features = ["profile-rustflags"]
-# e.g.:
-# cargo build --profile profiling-generate --features openblas-faer
 
 [package]
 name = "genomic_pca"
