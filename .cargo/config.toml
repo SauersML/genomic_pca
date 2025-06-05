@@ -1,5 +1,3 @@
-cargo-features = ["profile-rustflags"]
-
 [build]
 rustflags = ["-C", "target-cpu=native"]
 
