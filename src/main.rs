@@ -310,14 +310,14 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
 
     let algo_config = EigenSNPCoreAlgorithmConfig {
         target_num_global_pcs: cli_args.eigensnp_k_global.unwrap_or(10),
-        components_per_ld_block: cli_args.eigensnp_components_per_block.unwrap_or(7),
+        components_per_ld_block: cli_args.eigensnp_components_per_block.unwrap_or(10),
         subset_factor_for_local_basis_learning: cli_args.eigensnp_subset_factor.unwrap_or(0.1),
         min_subset_size_for_local_basis_learning: cli_args.eigensnp_min_subset_size.unwrap_or(20_000),
         max_subset_size_for_local_basis_learning: cli_args.eigensnp_max_subset_size.unwrap_or(60_000),
         global_pca_sketch_oversampling: cli_args.eigensnp_global_oversampling.unwrap_or(10),
         global_pca_num_power_iterations: cli_args.eigensnp_global_power_iter.unwrap_or(2),
-        local_rsvd_sketch_oversampling: cli_args.eigensnp_local_oversampling.unwrap_or(4),
-        local_rsvd_num_power_iterations: cli_args.eigensnp_local_power_iter.unwrap_or(2),
+        local_rsvd_sketch_oversampling: cli_args.eigensnp_local_oversampling.unwrap_or(3),
+        local_rsvd_num_power_iterations: cli_args.eigensnp_local_power_iter.unwrap_or(0),
         random_seed: cli_args.eigensnp_seed.unwrap_or(2025),
         snp_processing_strip_size: cli_args.eigensnp_snp_strip_size.unwrap_or(2000),
         refine_pass_count: cli_args.eigensnp_refine_passes.unwrap_or(1),
