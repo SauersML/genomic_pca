@@ -26,6 +26,10 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
+from typing import List # Added import
+
+# Define the list of subpopulations to exclude specifically from Logistic Regression calculations
+LOGREG_EXCLUDED_SUBPOPS: List[str] = ["ACB", "ASW", "CLM", "MXL", "PEL", "PUR"]
 from sklearn.metrics import silhouette_samples, adjusted_mutual_info_score, make_scorer, balanced_accuracy_score
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -264,72 +268,108 @@ def compute_metrics_for_superpopulations(
 
     # 2 ─── Iterate over super-populations
     for superpopulation_code in sorted(merged["Superpopulation code"].unique()):
-        subset = merged[merged["Superpopulation code"] == superpopulation_code]
-        pc_matrix = subset[pc_columns].to_numpy()
-        subpopulation_labels = subset["Population code"].to_numpy()
-
-        # KDEs for MI & JSD
-        kde_dict, pooled_kde = fit_gaussian_kdes(pc_matrix, subpopulation_labels)
-
-        # Logistic Regression Balanced Accuracy (CV)
-        unique_subpops, _ = np.unique(subpopulation_labels, return_counts=True) # _ signifies counts are not used here
-        num_unique_subpops = len(unique_subpops)
+        subset_orig = merged[merged["Superpopulation code"] == superpopulation_code]
         
-        logreg_balanced_accuracy_cv_raw = logistic_regression_balanced_accuracy(
-            pc_matrix, subpopulation_labels
-        )
+        # Original data for most metrics and reporting
+        pc_matrix_orig = subset_orig[pc_columns].to_numpy()
+        subpopulation_labels_orig = subset_orig["Population code"].to_numpy()
+        unique_subpops_orig, _ = np.unique(subpopulation_labels_orig, return_counts=True)
+        num_subpops_for_reporting = len(unique_subpops_orig)
 
-        # Normalized Logistic Regression Balanced Accuracy
-        if num_unique_subpops > 1:
-            chance_performance = 1.0 / num_unique_subpops
-            # Ensure logreg_balanced_accuracy_cv_raw is not NaN before comparison
-            if pd.notna(logreg_balanced_accuracy_cv_raw) and logreg_balanced_accuracy_cv_raw >= chance_performance:
-                logreg_normalized_accuracy_cv = (
-                    logreg_balanced_accuracy_cv_raw - chance_performance
-                ) / (1.0 - chance_performance)
-            else: # if raw accuracy is below chance or NaN, normalized is 0 or NaN
-                logreg_normalized_accuracy_cv = 0.0 if pd.notna(logreg_balanced_accuracy_cv_raw) else np.nan
-        else: # single subpopulation, accuracy is undefined
-            logreg_normalized_accuracy_cv = np.nan
+        # KDEs for MI & JSD (using original, unfiltered data for the superpopulation)
+        # Ensure there are samples to fit KDEs
+        kde_dict: Dict[str, KernelDensity] = {}
+        pooled_kde: KernelDensity | None = None
+        if pc_matrix_orig.shape[0] > 0 and len(unique_subpops_orig) > 0:
+             kde_dict, pooled_kde = fit_gaussian_kdes(pc_matrix_orig, subpopulation_labels_orig)
+        else: # Not enough data to fit KDEs
+            # Handle cases where pooled_kde might be expected by other functions if they were to be called
+            # For JSD, this will result in nan as jsd_values will be empty
+            pass
 
 
-        # Pairwise JSDs
+        # --- Logistic Regression Specific Data Preparation & Calculation ---
+        # Filter out excluded subpopulations for Logistic Regression
+        logreg_filter_mask = ~subset_orig["Population code"].isin(LOGREG_EXCLUDED_SUBPOPS)
+        subset_logreg = subset_orig[logreg_filter_mask]
+
+        pc_matrix_logreg = subset_logreg[pc_columns].to_numpy()
+        subpopulation_labels_logreg = subset_logreg["Population code"].to_numpy()
+
+        logreg_balanced_accuracy_cv_raw = np.nan
+        logreg_normalized_accuracy_cv = np.nan
+
+        num_unique_subpops_for_logreg_norm = 0
+        if pc_matrix_logreg.shape[0] > 0: # Check if any samples remain after filtering
+            unique_subpops_logreg_arr = np.unique(subpopulation_labels_logreg)
+            num_unique_subpops_for_logreg_norm = len(unique_subpops_logreg_arr)
+
+        # Proceed with LogReg calculation only if there are enough classes and samples
+        if num_unique_subpops_for_logreg_norm >= 2:
+            logreg_balanced_accuracy_cv_raw = logistic_regression_balanced_accuracy(
+                pc_matrix_logreg, subpopulation_labels_logreg
+            )
+            # Normalized Logistic Regression Balanced Accuracy (using logreg specific counts)
+            if pd.notna(logreg_balanced_accuracy_cv_raw): # Check if calculation was successful
+                chance_performance_logreg = 1.0 / num_unique_subpops_for_logreg_norm
+                if logreg_balanced_accuracy_cv_raw >= chance_performance_logreg:
+                    logreg_normalized_accuracy_cv = (
+                        logreg_balanced_accuracy_cv_raw - chance_performance_logreg
+                    ) / (1.0 - chance_performance_logreg)
+                else:
+                    logreg_normalized_accuracy_cv = 0.0
+            # If logreg_balanced_accuracy_cv_raw is NaN (e.g. from logistic_regression_balanced_accuracy), normalized also remains NaN.
+        # If num_unique_subpops_for_logreg_norm < 2, LogReg metrics remain np.nan (as initialized)
+        # --- End of Logistic Regression Specific Calculation ---
+
+        # Pairwise JSDs (using original, unfiltered data; unique_subpops_orig for iteration)
         jsd_values: List[float] = []
-        for i, label_a in enumerate(unique_subpops):
-            for label_b in unique_subpops[i + 1 :]:
-                jsd_values.append(
-                    monte_carlo_jsd(
-                        kde_dict[label_a],
-                        kde_dict[label_b],
-                        mc_samples=monte_carlo_samples,
-                        seed=17 + len(jsd_values),
-                    )
-                )
+        if pooled_kde is not None: # Check if KDEs were successfully created
+            for i, label_a in enumerate(unique_subpops_orig):
+                for label_b in unique_subpops_orig[i + 1 :]:
+                    # Ensure KDEs for these labels exist in the dictionary
+                    if label_a in kde_dict and label_b in kde_dict:
+                        jsd_values.append(
+                            monte_carlo_jsd(
+                                kde_dict[label_a],
+                                kde_dict[label_b],
+                                mc_samples=monte_carlo_samples,
+                                seed=17 + len(jsd_values),
+                            )
+                        )
         mean_jsd = float(np.mean(jsd_values)) if jsd_values else np.nan
         median_jsd = float(np.median(jsd_values)) if jsd_values else np.nan
 
-        # Silhouette statistics
-        silhouette_values = silhouette_samples(pc_matrix, subpopulation_labels)
-        average_silhouette = float(silhouette_values.mean())
-        median_silhouette = float(np.median(silhouette_values))
+        # Silhouette statistics (using original, unfiltered data)
+        average_silhouette = np.nan
+        median_silhouette = np.nan
+        # silhouette_samples requires at least 2 labels and more samples than labels.
+        if num_subpops_for_reporting >= 2 and pc_matrix_orig.shape[0] > num_subpops_for_reporting :
+            try:
+                silhouette_values = silhouette_samples(pc_matrix_orig, subpopulation_labels_orig)
+                average_silhouette = float(silhouette_values.mean())
+                median_silhouette = float(np.median(silhouette_values))
+            except ValueError: # handles cases where silhouette cannot be computed e.g. all points in one cluster after some internal processing by silhouette_samples
+                pass
 
-        # Contrastive violation statistics
+
+        # Contrastive violation statistics (using original, unfiltered data)
         mean_contrastive, median_contrastive = contrastive_violation_statistics(
-            pc_matrix, subpopulation_labels
+            pc_matrix_orig, subpopulation_labels_orig
         )
 
-        # Adaptive HDBSCAN AMI
+        # Adaptive HDBSCAN AMI (using original, unfiltered data)
         hdbscan_ami = best_hdbscan_adjusted_mutual_information(
-            pc_matrix, subpopulation_labels
+            pc_matrix_orig, subpopulation_labels_orig
         )
 
         # TSV row
         row_values = [
             superpopulation_code,
-            len(subset),
-            num_unique_subpops, # Use num_unique_subpops here
-            logreg_balanced_accuracy_cv_raw,
-            logreg_normalized_accuracy_cv,
+            len(subset_orig), # Number of samples before any LogReg specific filtering
+            num_subpops_for_reporting, # Number of subpopulations before LogReg specific filtering
+            logreg_balanced_accuracy_cv_raw, # Calculated with filtered data
+            logreg_normalized_accuracy_cv, # Calculated with filtered data and correct N_classes
             mean_jsd,
             median_jsd,
             average_silhouette,
