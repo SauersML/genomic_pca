@@ -1,3 +1,5 @@
+use std::simd::{Simd, Mask, StdFloat};
+use std::simd::prelude::*;
 use flume;
 use log::{debug, error, info, warn};
 use ndarray::{Array1, Array2};
@@ -7,7 +9,7 @@ use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError};
 use thiserror::Error;
-use std::simd::Simd; use std::simd::prelude::{SimdPartialEq, SimdFloat, SimdInt};
+// use std::simd::Simd; use std::simd::prelude::{SimdPartialEq, SimdFloat, SimdInt};
 use std::simd::num::SimdUint;
 
 // SIMD Lane constants
@@ -59,7 +61,6 @@ pub enum DataPrepError {
         context: String,
         #[source]
         source: ThreadSafeStdError, // This is Box<dyn Error + Send + Sync + 'static>
-                                     // Note: This was targeted by a previous subtask to change source type
     },
 
     #[error("{0}")]
@@ -201,7 +202,7 @@ mod io_service_infrastructure {
     }
 
     /// Represents responses sent from IO actors back to the requesting logic.
-    /// Ensures responses are Send + Sync as required by flume if passed across threads.
+    /// responses are Send + Sync as required by flume if passed across threads.
     /// Ndarray Arrays are Send/Sync if their elements are; String is; Result is if Ok/Err are.
     #[derive(Debug)]
     pub(crate) enum IoResponse {
@@ -1185,10 +1186,6 @@ impl MicroarrayDataPreparer {
                                  continue; // Skip to the next I/O chunk
                             }
 
-                            let min_snp_call_rate_thresh = self.config.min_snp_call_rate_threshold;
-                            let min_snp_maf_thresh = self.config.min_snp_maf_threshold;
-                            let max_snp_hwe_p_thresh = self.config.max_snp_hwe_p_value_threshold;
-
                             // Parallelize QC over SNPs within this fetched chunk using Rayon.
                             let qc_results_for_this_io_chunk: Vec<IntermediateSnpDetails> =
                                 genotypes_for_chunk_samples_x_snps
@@ -1210,161 +1207,157 @@ impl MicroarrayDataPreparer {
                                         if num_samples_total == 0 {
                                             return None; // No data to process
                                         }
+                                        // This check was already here and is correct.
                                         if num_qc_samples > 0 && num_samples_total != num_qc_samples {
                                              warn!("SNP QC (idx {}): Genotype array view length ({}) within chunk does not match num_qc_samples ({}). Skipping.",
                                                    original_m_idx, num_samples_total, num_qc_samples);
                                              return None;
                                         }
 
+                                        // Scalar accumulators
+                                        let mut num_valid_genotypes_for_snp_scalar: u32 = 0;
+                                        let mut allele1_dosage_sum_f64_scalar: f64 = 0.0;
+                                        let mut obs_hom_ref_count_scalar: u32 = 0;
+                                        let mut obs_het_count_scalar: u32 = 0;
+                                        let mut obs_hom_alt_count_scalar: u32 = 0;
 
-                                        use std::simd::Mask; // Ensure Mask is in scope
-
-                                        let mut num_valid_genotypes_for_snp: u32 = 0;
-                                        let mut allele1_dosage_sum_f64_scalar_pass1: f64 = 0.0;
-
-                                        let mut obs_hom_ref_count: u32 = 0;
-                                        let mut obs_het_count: u32 = 0;
-                                        let mut obs_hom_alt_count: u32 = 0;
-
-                                        let missing_i8_simd = Simd::<i8, ACTUAL_LANES_I8>::splat(-127_i8);
-                                        let zero_i8_simd    = Simd::<i8, ACTUAL_LANES_I8>::splat(0_i8);
-                                        let one_i8_simd     = Simd::<i8, ACTUAL_LANES_I8>::splat(1_i8);
-                                        let two_i8_simd     = Simd::<i8, ACTUAL_LANES_I8>::splat(2_i8);
-
-                                        let one_u32_simd_for_count = Simd::<u32, ACTUAL_LANES_I8>::splat(1u32);
-                                        let zero_u32_simd_for_count = Simd::<u32, ACTUAL_LANES_I8>::splat(0u32);
-
-                                        // Pass 1: Calculate counts and sums for mean
+                                        // SIMD Constants
+                                        let missing_i8_simd = Simd::<i8, ACTUAL_LANES_I8>::splat(-127i8);
+                                        let zero_i8_simd    = Simd::<i8, ACTUAL_LANES_I8>::splat(0i8);
+                                        let one_i8_simd     = Simd::<i8, ACTUAL_LANES_I8>::splat(1i8);
+                                        let two_i8_simd     = Simd::<i8, ACTUAL_LANES_I8>::splat(2i8);
+                                        
+                                        let ones_u32_simd  = Simd::<u32, ACTUAL_LANES_I8>::splat(1u32);
+                                        let zeros_u32_simd = Simd::<u32, ACTUAL_LANES_I8>::splat(0u32);
+                                        
+                                        // --- Pass 1: Count valid genotypes, sum dosages, count observed genotypes ---
                                         let mut i: usize = 0;
                                         while i + ACTUAL_LANES_I8 <= num_samples_total {
-                                            let i8_values_chunk = Simd::<i8, ACTUAL_LANES_I8>::from_slice(&snp_data_slice[i..i + ACTUAL_LANES_I8]);
-                                            let valid_mask = i8_values_chunk.simd_ne(missing_i8_simd);
+                                            let i8_chunk = Simd::<i8, ACTUAL_LANES_I8>::from_slice(&snp_data_slice[i..i + ACTUAL_LANES_I8]);
+                                            let valid_mask_i8 = i8_chunk.simd_ne(missing_i8_simd); // Mask<i8, 32>
 
-                                            num_valid_genotypes_for_snp += valid_mask.select(one_u32_simd_for_count, zero_u32_simd_for_count).reduce_sum();
+                                            // Cast Mask<i8, 32> to Mask<i32, 32> for select with u32 SIMD vectors
+                                            let valid_mask_for_u32_select: Mask<i32, ACTUAL_LANES_I8> = valid_mask_i8.cast();
+                                            num_valid_genotypes_for_snp_scalar += valid_mask_for_u32_select.select(ones_u32_simd, zeros_u32_simd).reduce_sum();
+                                            
+                                            let hom_ref_condition_mask_i8: Mask<i8, ACTUAL_LANES_I8> = i8_chunk.simd_eq(zero_i8_simd) & valid_mask_i8;
+                                            let hom_ref_select_mask_i32: Mask<i32, ACTUAL_LANES_I8> = hom_ref_condition_mask_i8.cast();
+                                            obs_hom_ref_count_scalar += hom_ref_select_mask_i32.select(ones_u32_simd, zeros_u32_simd).reduce_sum();
 
-                                            // Refined logic for allele1_dosage_sum_f64_scalar_pass1 accumulation:
-                                            for chunk_idx_s4 in 0..(ACTUAL_LANES_I8 / ACTUAL_LANES_F64) { // Iterate 32/4 = 8 times
-                                                let start_lane_in_i8_chunk = chunk_idx_s4 * ACTUAL_LANES_F64;
+                                            let het_condition_mask_i8: Mask<i8, ACTUAL_LANES_I8> = i8_chunk.simd_eq(one_i8_simd) & valid_mask_i8;
+                                            let het_select_mask_i32: Mask<i32, ACTUAL_LANES_I8> = het_condition_mask_i8.cast();
+                                            obs_het_count_scalar     += het_select_mask_i32.select(ones_u32_simd, zeros_u32_simd).reduce_sum();
 
-                                                let mut i8_sub_arr = [0_i8; ACTUAL_LANES_F64];
-                                                let mut mask_elements_for_simd = [core::simd::mask8::splat(false); ACTUAL_LANES_F64];
+                                            let hom_alt_condition_mask_i8: Mask<i8, ACTUAL_LANES_I8> = i8_chunk.simd_eq(two_i8_simd) & valid_mask_i8;
+                                            let hom_alt_select_mask_i32: Mask<i32, ACTUAL_LANES_I8> = hom_alt_condition_mask_i8.cast();
+                                            obs_hom_alt_count_scalar += hom_alt_select_mask_i32.select(ones_u32_simd, zeros_u32_simd).reduce_sum();
 
-                                                for k_s4 in 0..ACTUAL_LANES_F64 {
-                                                    let current_lane_idx = start_lane_in_i8_chunk + k_s4;
-                                                    i8_sub_arr[k_s4] = i8_values_chunk.to_array()[current_lane_idx];
-                                                    let is_lane_valid = valid_mask.test(current_lane_idx);
-                                                    mask_elements_for_simd[k_s4] = core::simd::mask8::splat(is_lane_valid);
-                                                }
+                                            // 1. Zero out invalid dosages in the wide i8 vector.
+                                            let i8_for_sum = valid_mask_i8.select(i8_chunk, Simd::splat(0i8));
 
-                                                let i8_s4 = Simd::<i8, ACTUAL_LANES_F64>::from_array(i8_sub_arr);
-                                                let valid_mask_s4_for_select = Mask::<i8, ACTUAL_LANES_F64>::from_array(mask_elements_for_simd);
+                                            // 2. Cast the *entire* Simd<i8, ACTUAL_LANES_I8> to Simd<f64, ACTUAL_LANES_I8>.
+                                            let f64_dosages: Simd<f64, ACTUAL_LANES_I8> = i8_for_sum.cast();
 
-                                                let f32_s4 = i8_s4.cast::<f32>();
-                                                let f64_s4 = f32_s4.cast::<f64>();
-
-                                                let f64_s4_masked = valid_mask_s4_for_select.select(f64_s4, Simd::splat(0.0f64));
-                                                allele1_dosage_sum_f64_scalar_pass1 += f64_s4_masked.reduce_sum();
-                                            }
-
-                                            obs_hom_ref_count += (i8_values_chunk.simd_eq(zero_i8_simd) & valid_mask).select(one_u32_simd_for_count, zero_u32_simd_for_count).reduce_sum();
-                                            obs_het_count     += (i8_values_chunk.simd_eq(one_i8_simd)  & valid_mask).select(one_u32_simd_for_count, zero_u32_simd_for_count).reduce_sum();
-                                            obs_hom_alt_count += (i8_values_chunk.simd_eq(two_i8_simd)  & valid_mask).select(one_u32_simd_for_count, zero_u32_simd_for_count).reduce_sum();
-
+                                            // 3. Reduce the wide Simd<f64, ACTUAL_LANES_I8> vector once and add to the scalar.
+                                            allele1_dosage_sum_f64_scalar += f64_dosages.reduce_sum();
+                                            
                                             i += ACTUAL_LANES_I8;
                                         }
 
                                         // Scalar remainder loop for Pass 1
                                         for k_rem in i..num_samples_total {
                                             let val = snp_data_slice[k_rem];
-                                            if val != -127_i8 {
-                                                num_valid_genotypes_for_snp += 1;
-                                                allele1_dosage_sum_f64_scalar_pass1 += val as f64;
+                                            if val != -127i8 {
+                                                num_valid_genotypes_for_snp_scalar += 1;
+                                                allele1_dosage_sum_f64_scalar += val as f64;
                                                 match val {
-                                                    0 => obs_hom_ref_count += 1,
-                                                    1 => obs_het_count += 1,
-                                                    2 => obs_hom_alt_count += 1,
-                                                    _ => {}
+                                                    0 => obs_hom_ref_count_scalar += 1,
+                                                    1 => obs_het_count_scalar += 1,
+                                                    2 => obs_hom_alt_count_scalar += 1,
+                                                    _ => {} // Should not happen with BED data
                                                 }
                                             }
                                         }
-
-                                        // QC Checks
-                                        if num_qc_samples > 0 {
-                                            let call_rate = num_valid_genotypes_for_snp as f64 / num_qc_samples as f64;
+                                        
+                                        // --- QC Checks (using scalar accumulators) ---
+                                        if num_qc_samples > 0 { // num_qc_samples is the total number of samples after QC
+                                            let call_rate = num_valid_genotypes_for_snp_scalar as f64 / num_qc_samples as f64;
                                             if call_rate < self.config.min_snp_call_rate_threshold { return None; }
-                                        } else if num_valid_genotypes_for_snp > 0 { return None; }
-
-                                        if num_valid_genotypes_for_snp == 0 { return None; }
-
-                                        let mean_allele1_dosage_f64 = allele1_dosage_sum_f64_scalar_pass1 / num_valid_genotypes_for_snp as f64;
-                                        let allele1_freq = mean_allele1_dosage_f64 / 2.0;
-                                        let maf = allele1_freq.min(1.0 - allele1_freq);
-
-                                        if maf < self.config.min_snp_maf_threshold || allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
+                                        } else if num_valid_genotypes_for_snp_scalar == 0 { // If num_qc_samples is 0, this implies no samples, so valid genotypes must be 0
+                                            return None;
+                                        } else { // num_qc_samples is 0, but valid genotypes > 0. This is an inconsistent state.
+                                            warn!("SNP QC (idx {}): num_qc_samples is 0, but found {} valid genotypes. Inconsistent state. Skipping.", original_m_idx, num_valid_genotypes_for_snp_scalar);
                                             return None;
                                         }
 
-                                        if self.config.max_snp_hwe_p_value_threshold < 1.0 {
+                                        if num_valid_genotypes_for_snp_scalar == 0 { return None; } // No valid data to compute stats
+
+                                        let mean_allele1_dosage_f64 = allele1_dosage_sum_f64_scalar / num_valid_genotypes_for_snp_scalar as f64;
+                                        let allele1_freq = mean_allele1_dosage_f64 / 2.0; // Dosages are 0, 1, 2
+                                        let maf = allele1_freq.min(1.0 - allele1_freq);
+
+                                        // MAF check (includes monomorphic check indirectly if maf_threshold > 0)
+                                        if maf < self.config.min_snp_maf_threshold { return None; }
+                                        // Explicit check for monomorphic SNPs if maf_threshold is 0, or to catch floating point edge cases.
+                                        // A SNP is monomorphic if p or q is effectively 0.
+                                        if allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
+                                            return None; // Monomorphic
+                                        }
+                                        
+                                        if self.config.max_snp_hwe_p_value_threshold < 1.0 { // Only calculate HWE if threshold is not 1.0 (i.e., filter is active)
                                             let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(
-                                                obs_hom_ref_count as usize, obs_het_count as usize, obs_hom_alt_count as usize
+                                                obs_hom_ref_count_scalar as usize, obs_het_count_scalar as usize, obs_hom_alt_count_scalar as usize
                                             );
                                             if hwe_p_val <= self.config.max_snp_hwe_p_value_threshold { return None; }
                                         }
-
+                                        
                                         let mean_f32_for_storage = mean_allele1_dosage_f64 as f32;
 
-                                        // Pass 2: Calculate Sum of Squared Differences (SoS)
+                                        // --- Pass 2: Calculate Sum of Squared Differences (SoS) for variance ---
                                         let mut sum_sq_diff_f64_scalar_pass2: f64 = 0.0;
-                                        let mean_for_sos_f64 = mean_allele1_dosage_f64;
-                                        let mean_f64_s4_splat = Simd::<f64, ACTUAL_LANES_F64>::splat(mean_for_sos_f64);
+                                        // Removed: let mean_simd_f64 = Simd::<f64, ACTUAL_LANES_F64>::splat(mean_allele1_dosage_f64);
 
-                                        i = 0; // Reset i
+                                        i = 0; // Reset i for Pass 2
                                         while i + ACTUAL_LANES_I8 <= num_samples_total {
-                                            let i8_values_chunk = Simd::<i8, ACTUAL_LANES_I8>::from_slice(&snp_data_slice[i..i + ACTUAL_LANES_I8]);
-                                            let valid_mask = i8_values_chunk.simd_ne(missing_i8_simd); // This is Mask<i8, ACTUAL_LANES_I8>
+                                            let i8_chunk = Simd::<i8, ACTUAL_LANES_I8>::from_slice(&snp_data_slice[i..i + ACTUAL_LANES_I8]);
+                                            let valid_mask_i8 = i8_chunk.simd_ne(missing_i8_simd); // Mask<i8, ACTUAL_LANES_I8>
+                                            
+                                            // 1. Splat scalar mean to a wide f64 SIMD vector.
+                                            let mean_simd_f64_wide = Simd::<f64, ACTUAL_LANES_I8>::splat(mean_allele1_dosage_f64);
 
-                                            // Refined logic for sum_sq_diff_f64_scalar_pass2 accumulation:
-                                            for chunk_idx_s4 in 0..(ACTUAL_LANES_I8 / ACTUAL_LANES_F64) { // Iterate 32/4 = 8 times
-                                                let start_lane_in_i8_chunk = chunk_idx_s4 * ACTUAL_LANES_F64;
+                                            // 2. Cast original i8 data to f64, for the whole wide vector.
+                                            let f64_dosages: Simd<f64, ACTUAL_LANES_I8> = i8_chunk.cast();
 
-                                                let mut i8_sub_arr = [0_i8; ACTUAL_LANES_F64];
-                                                let mut mask_elements_for_simd = [core::simd::mask8::splat(false); ACTUAL_LANES_F64];
+                                            // 3. Calculate differences and squares on wide vectors.
+                                            let diff_f64 = f64_dosages - mean_simd_f64_wide;
+                                            let diff_sq_f64 = diff_f64 * diff_f64;
 
-                                                for k_s4 in 0..ACTUAL_LANES_F64 {
-                                                    let current_lane_idx = start_lane_in_i8_chunk + k_s4;
-                                                    i8_sub_arr[k_s4] = i8_values_chunk.to_array()[current_lane_idx];
-                                                    let is_lane_valid = valid_mask.test(current_lane_idx);
-                                                    mask_elements_for_simd[k_s4] = core::simd::mask8::splat(is_lane_valid);
-                                                }
+                                            // 4. Cast the original i8 mask to the correct mask type for f64 data (Mask<i64, ACTUAL_LANES_I8>).
+                                            let valid_mask_for_f64_select: Mask<i64, ACTUAL_LANES_I8> = valid_mask_i8.cast();
 
-                                                let i8_s4 = Simd::<i8, ACTUAL_LANES_F64>::from_array(i8_sub_arr);
-                                                let valid_mask_s4_for_select = Mask::<i8, ACTUAL_LANES_F64>::from_array(mask_elements_for_simd);
+                                            // 5. Select valid squared differences, zeroing out others, on the wide vector.
+                                            let selected_diff_sq_f64 = valid_mask_for_f64_select.select(diff_sq_f64, Simd::splat(0.0f64));
 
-                                                let f32_s4 = i8_s4.cast::<f32>();
-                                                let f64_s4_data = f32_s4.cast::<f64>(); // These are unmasked values
-
-                                                let diff_f64_s4 = f64_s4_data - mean_f64_s4_splat;
-                                                let diff_sq_f64_s4 = diff_f64_s4 * diff_f64_s4;
-
-                                                let final_diff_sq_to_sum_s4 = valid_mask_s4_for_select.select(diff_sq_f64_s4, Simd::splat(0.0f64));
-                                                sum_sq_diff_f64_scalar_pass2 += final_diff_sq_to_sum_s4.reduce_sum();
-                                            }
+                                            // 6. Reduce the wide Simd<f64, ACTUAL_LANES_I8> vector once and add to the scalar.
+                                            sum_sq_diff_f64_scalar_pass2 += selected_diff_sq_f64.reduce_sum();
+                                            
                                             i += ACTUAL_LANES_I8;
                                         }
 
-                                        // Scalar remainder for SoS
+                                        // Scalar remainder loop for SoS (Pass 2)
                                         for k_rem in i..num_samples_total {
                                             let val = snp_data_slice[k_rem];
-                                            if val != -127_i8 {
-                                                let diff = (val as f64) - mean_for_sos_f64;
+                                            if val != -127i8 {
+                                                let diff = (val as f64) - mean_allele1_dosage_f64;
                                                 sum_sq_diff_f64_scalar_pass2 += diff * diff;
                                             }
                                         }
 
                                         // Final Calculations & Return
                                         let variance_f64: f64;
-                                        if num_valid_genotypes_for_snp >= 2 {
-                                            variance_f64 = sum_sq_diff_f64_scalar_pass2 / (num_valid_genotypes_for_snp - 1) as f64;
+                                        // Corrected to use num_valid_genotypes_for_snp_scalar
+                                        if num_valid_genotypes_for_snp_scalar >= 2 {
+                                            variance_f64 = sum_sq_diff_f64_scalar_pass2 / (num_valid_genotypes_for_snp_scalar - 1) as f64;
                                         } else {
                                             variance_f64 = 0.0;
                                         }
@@ -1931,7 +1924,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     let target_slice: &mut [std::mem::MaybeUninit<f32>] = &mut std_mut_slice[i_req_sample..i_req_sample + ACTUAL_LANES_F32];
                                     // Writing to a MaybeUninit slice of correct length.
                                     // Pointer is valid as it's derived from a mutable slice we have exclusive access to.
-                                    // Non-overlapping is ensured as we are writing distinct chunks.
+                                    // Non-overlapping as we are writing distinct chunks.
                                     let data_array: [f32; ACTUAL_LANES_F32] = simd_zeros.to_array();
                                     unsafe {
                                         std::ptr::copy_nonoverlapping(data_array.as_ptr(), target_slice.as_mut_ptr() as *mut f32, ACTUAL_LANES_F32);
@@ -1944,21 +1937,22 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                 let raw_dosage_val_i8 = if let Some(slice) = raw_slice_option {
                                     slice[k_sample]
                                 } else {
-                                    *raw_snp_row.uget(k_sample)
+                                    unsafe { *raw_snp_row.uget(k_sample) }
                                 };
                                 if raw_dosage_val_i8 == -127i8 {
                                     return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
                                                           pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[k_sample].0))) as ThreadSafeStdError);
                                 }
-                                if let Some(slice_mut) = std_mut_slice_option {
-                                    slice_mut[k_sample] = std::mem::MaybeUninit::new(0.0f32);
-                                } else {
-                                    standardized_snp_row_to_fill.uget_mut(k_sample).write(0.0f32);
-                                }
+                                // Removed the if let Some(slice_mut) = std_mut_slice_option check
+                                unsafe { standardized_snp_row_to_fill.uget_mut(k_sample).write(0.0f32); }
                             }
                         } else { // std_dev_dosage is NOT near zero
-                            let simd_mean = Simd::<f32, ACTUAL_LANES_F32>::splat(mean_dosage);
-                            let simd_std_dev = Simd::<f32, ACTUAL_LANES_F32>::splat(std_dev_dosage);
+                            // Define scalar versions for mul_add in the remainder loop
+                            let recip_std_dev_val = 1.0f32 / std_dev_dosage;
+                            let b_term_val = -mean_dosage * recip_std_dev_val;
+
+                            let simd_mean = Simd::<f32, ACTUAL_LANES_F32>::splat(mean_dosage); // Remains for SIMD part
+                            let simd_std_dev = Simd::<f32, ACTUAL_LANES_F32>::splat(std_dev_dosage); // Remains for SIMD part
                             let simd_missing_i8 = Simd::<i8, ACTUAL_LANES_F32>::splat(-127i8);
 
                             if let (Some(raw_slice), Some(std_mut_slice)) = (raw_slice_option, std_mut_slice_option) {
@@ -1998,7 +1992,7 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                     let target_slice: &mut [std::mem::MaybeUninit<f32>] = &mut std_mut_slice[i_req_sample..i_req_sample + ACTUAL_LANES_F32];
                                     // Writing to a MaybeUninit slice of correct length.
                                     // Pointer is valid as it's derived from a mutable slice we have exclusive access to.
-                                    // Non-overlapping is ensured as we are writing distinct chunks.
+                                    // Non-overlapping as we are writing distinct chunks.
                                     let data_array: [f32; ACTUAL_LANES_F32] = standardized_chunk.to_array();
                                     unsafe {
                                         std::ptr::copy_nonoverlapping(data_array.as_ptr(), target_slice.as_mut_ptr() as *mut f32, ACTUAL_LANES_F32);
@@ -2011,18 +2005,15 @@ impl PcaReadyGenotypeAccessor for MicroarrayGenotypeAccessor {
                                 let raw_dosage_val_i8 = if let Some(slice) = raw_slice_option {
                                     slice[k_sample]
                                 } else {
-                                    *raw_snp_row.uget(k_sample)
+                                    unsafe { *raw_snp_row.uget(k_sample) }
                                 };
                                 if raw_dosage_val_i8 == -127i8 {
                                      return Err(Box::new(DataPrepError::Message(format!("Unexpected missing genotype (-127i8) in SnpBlockData for PCA SNP ID {} (original BIM index {}), requested sample index {}. This should have been filtered by QC.",
                                                           pca_snp_id_val, self.original_indices_of_pca_snps[pca_snp_id_val], qc_sample_ids_to_fetch[k_sample].0))) as ThreadSafeStdError);
                                 }
-                                let standardized_val = (raw_dosage_val_i8 as f32 - mean_dosage) / std_dev_dosage;
-                                if let Some(slice_mut) = std_mut_slice_option {
-                                    slice_mut[k_sample].write(standardized_val);
-                                } else {
-                                    standardized_snp_row_to_fill.uget_mut(k_sample).write(standardized_val);
-                                }
+                                let standardized_val = (raw_dosage_val_i8 as f32).mul_add(recip_std_dev_val, b_term_val);
+                                // Removed the if let Some(slice_mut) = std_mut_slice_option check
+                                unsafe { standardized_snp_row_to_fill.uget_mut(k_sample).write(standardized_val); }
                             }
                         }
                     }
