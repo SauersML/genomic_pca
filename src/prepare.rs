@@ -16,7 +16,6 @@ use std::simd::num::SimdUint;
 const TARGET_SIMD_BYTES: usize = 32; // 256 bits / 8 bits_per_byte
 const ACTUAL_LANES_I8: usize = TARGET_SIMD_BYTES / std::mem::size_of::<i8>();   // 32
 const ACTUAL_LANES_F32: usize = TARGET_SIMD_BYTES / std::mem::size_of::<f32>(); // 8
-const ACTUAL_LANES_F64: usize = TARGET_SIMD_BYTES / std::mem::size_of::<f64>(); // 4
 
 // bed_reader imports
 use bed_reader::{Bed, BedErrorPlus, ReadOptions};
