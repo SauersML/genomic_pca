@@ -34,6 +34,7 @@ METRICS_MC_SAMPLES_KDE = 4000 # Default for metrics.py
 
 METRIC_COLUMNS_TO_ANALYZE = [
     "LogReg_Balanced_Accuracy_CV",
+    "LogReg_Normalized_Accuracy_CV",
     "Mean_multivariate_Jensen_Shannon_divergence_nats",
     "Average_silhouette",
     "Mean_contrastive_violation",
@@ -41,11 +42,12 @@ METRIC_COLUMNS_TO_ANALYZE = [
 ]
 
 METRIC_PROPERTIES = {
-    "LogReg_Balanced_Accuracy_CV": {"higher_is_better": True, "name": "LogReg Balanced Accuracy (CV)"},
+    "LogReg_Balanced_Accuracy_CV": {"higher_is_better": True, "name": "LogReg Balanced Accuracy (Raw CV)"}, # Ensure no range_min/max
+    "LogReg_Normalized_Accuracy_CV": {"higher_is_better": True, "name": "LogReg Accuracy (Normalized Skill Score)", "range_min": -0.1, "range_max": 1.05},
     "Mean_multivariate_Jensen_Shannon_divergence_nats": {"higher_is_better": True, "name": "Mean JSD (nats)"},
-    "Average_silhouette": {"higher_is_better": True, "name": "Avg. Silhouette"},
+    "Average_silhouette": {"higher_is_better": True, "name": "Avg. Silhouette"}, # Ensure no range_min/max unless originally specified
     "Mean_contrastive_violation": {"higher_is_better": False, "name": "Mean Contrastive Violation"},
-    "HDBSCAN_adjusted_mutual_information": {"higher_is_better": True, "name": "HDBSCAN AMI"},
+    "HDBSCAN_adjusted_mutual_information": {"higher_is_better": True, "name": "HDBSCAN AMI"}, # Ensure no range_min/max unless originally specified
 }
 
 # --- Parallelism Configuration ---
@@ -336,7 +338,7 @@ def main():
         for metric_idx, metric_key in enumerate(METRIC_COLUMNS_TO_ANALYZE):
             ax_left = axes_param_metrics[metric_idx, 0]
             ax_right = axes_param_metrics[metric_idx, 1]
-            metric_props = METRIC_PROPERTIES.get(metric_key, {"higher_is_better": True, "name": metric_key})
+            metric_props = METRIC_PROPERTIES.get(metric_key, {"higher_is_better": True, "name": metric_key, "range_min": np.nan, "range_max": np.nan})
     
             # Use raw metric values for plotting from df_all_metrics.
             # The 'Base Defaults' run is added to ensure the default parameter value is plotted if not already swept.
@@ -397,17 +399,25 @@ def main():
                 y_min_left = np.nanmin(all_y_values_for_lim_left)
                 y_max_left = np.nanmax(all_y_values_for_lim_left)
 
-            if pd.notna(y_min_left) and pd.notna(y_max_left):
+            # Use predefined range if available, otherwise calculate dynamically
+            defined_y_min = metric_props.get("range_min")
+            defined_y_max = metric_props.get("range_max")
+
+            if pd.notna(defined_y_min) and pd.notna(defined_y_max):
+                final_y_min_left, final_y_max_left = defined_y_min, defined_y_max
+                # If all data is outside a fixed range, allow dynamic override or indicate clipping
+                if all_y_values_for_lim_left and (np.nanmax(all_y_values_for_lim_left) < defined_y_min or np.nanmin(all_y_values_for_lim_left) > defined_y_max):
+                    pass # Keep defined range, clipping will occur or markers will indicate out of bounds.
+            elif pd.notna(y_min_left) and pd.notna(y_max_left): # Dynamic calculation
                 y_range_left = y_max_left - y_min_left
-                padding_left = y_range_left * 0.05 if y_range_left > 1e-9 else 1.0
+                padding_left = y_range_left * 0.05 if y_range_left > 1e-9 else 0.1 # Adjusted padding
                 final_y_min_left = y_min_left - padding_left
                 final_y_max_left = y_max_left + padding_left
-                ax_left.set_ylim(final_y_min_left, final_y_max_left)
-            elif metric_key == "LogReg_Balanced_Accuracy_CV": # Specific default for accuracy
-                 ax_left.set_ylim(0, 1.05)
-            # Add other metric-specific default y-limits if necessary
+            else: # Fallback if no data or single point
+                final_y_min_left, final_y_max_left = (0.0, 1.0) if "Accuracy" in metric_key else (np.nan, np.nan) # Default for accuracy like metrics
 
-            y_plot_min_left, y_plot_max_left = ax_left.get_ylim()
+            ax_left.set_ylim(final_y_min_left, final_y_max_left)
+            y_plot_min_left, y_plot_max_left = ax_left.get_ylim() # Get what was actually set
 
             # Left Subplot: Plot Exact PCA raw metric reference lines
             # relevant_exact_pca_for_metric was already defined above with raw metric check
@@ -467,19 +477,23 @@ def main():
                 y_min_right = np.nanmin(all_y_values_for_lim_right)
                 y_max_right = np.nanmax(all_y_values_for_lim_right)
 
-            if pd.notna(y_min_right) and pd.notna(y_max_right):
+            # Use predefined range if available for right plot, otherwise calculate dynamically or use left plot's
+            if pd.notna(defined_y_min) and pd.notna(defined_y_max): # Use same defined range as left plot
+                final_y_min_right, final_y_max_right = defined_y_min, defined_y_max
+                if all_y_values_for_lim_right and (np.nanmax(all_y_values_for_lim_right) < defined_y_min or np.nanmin(all_y_values_for_lim_right) > defined_y_max):
+                     pass # Keep defined range
+            elif pd.notna(y_min_right) and pd.notna(y_max_right): # Dynamic calculation
                 y_range_right = y_max_right - y_min_right
-                padding_right = y_range_right * 0.05 if y_range_right > 1e-9 else 1.0
+                padding_right = y_range_right * 0.05 if y_range_right > 1e-9 else 0.1 # Adjusted padding
                 final_y_min_right = y_min_right - padding_right
                 final_y_max_right = y_max_right + padding_right
-                ax_right.set_ylim(final_y_min_right, final_y_max_right)
-            elif not df_plot_ready.empty and pd.notna(y_min_left) and pd.notna(y_max_left): # Fallback to left plot's limits if sensible
-                 ax_right.set_ylim(y_plot_min_left, y_plot_max_left)
-            elif metric_key == "LogReg_Balanced_Accuracy_CV": # Specific default for accuracy
-                 ax_right.set_ylim(0, 1.05)
-            # Add other metric-specific default y-limits if necessary
-            
-            y_plot_min_right, y_plot_max_right = ax_right.get_ylim()
+            elif pd.notna(final_y_min_left) and pd.notna(final_y_max_left): # Fallback to left plot's limits if sensible
+                 final_y_min_right, final_y_max_right = final_y_min_left, final_y_max_left
+            else: # Absolute fallback
+                final_y_min_right, final_y_max_right = (0.0, 1.0) if "Accuracy" in metric_key else (np.nan, np.nan)
+
+            ax_right.set_ylim(final_y_min_right, final_y_max_right)
+            y_plot_min_right, y_plot_max_right = ax_right.get_ylim() # Get what was actually set
 
             # Right Subplot: Plot Exact PCA aggregate raw metric lines
             if not relevant_exact_pca_raw_metric.empty: # Use the previously defined relevant_exact_pca_raw_metric
@@ -545,10 +559,18 @@ def main():
         plt.close(fig_param_metrics)
 
     # 5. Plotting - LogReg Accuracy Mega-Plot
-    print("\nGenerating logistic regression raw accuracy mega-plot...")
+    print("\nGenerating logistic regression normalized skill score accuracy mega-plot...") # Updated print message
+    logreg_metric_to_plot = "LogReg_Normalized_Accuracy_CV"
+    # Correctly derive display name and y-limits from METRIC_PROPERTIES
+    accuracy_metric_props = METRIC_PROPERTIES[logreg_metric_to_plot]
+    accuracy_metric_display_name = accuracy_metric_props["name"]
+    # Use .get() with specified fallbacks for y-limits, matching the issue spec
+    y_lim_acc_min = accuracy_metric_props.get("range_min", -0.1)
+    y_lim_acc_max = accuracy_metric_props.get("range_max", 1.05)
+
     num_accuracy_subplots = len(unique_swept_eigensnp_params)
     if num_accuracy_subplots == 0:
-        print("No swept parameters found for accuracy plot. Skipping.")
+        print(f"No swept parameters found for {accuracy_metric_display_name} plot. Skipping.")
     else:
         fig_acc, axes_acc = plt.subplots(num_accuracy_subplots, 2,
                                          figsize=(10, 4 * num_accuracy_subplots),
@@ -558,10 +580,10 @@ def main():
             ax_right = axes_acc[idx, 1]
 
             df_param = df_all_metrics[df_all_metrics["swept_param_name"] == param_name].copy()
-            df_param = df_param.dropna(subset=["swept_param_value_numeric", "LogReg_Balanced_Accuracy_CV"])
+            df_param = df_param.dropna(subset=["swept_param_value_numeric", logreg_metric_to_plot]) # MODIFIED
 
             if df_param.empty:
-                ax_left.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_left.transAxes)
+                ax_left.text(0.5, 0.5, f"No data for {logreg_metric_to_plot}", ha="center", va="center", transform=ax_left.transAxes) # MODIFIED
                 ax_right.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_right.transAxes)
                 continue
 
@@ -577,7 +599,7 @@ def main():
                 df_sp = (df_param[df_param["superpopulation"] == sp]
                          .sort_values("swept_param_value_numeric"))
                 line_left = ax_left.plot(df_sp["swept_param_value_numeric"],
-                                         df_sp["LogReg_Balanced_Accuracy_CV"],
+                                         df_sp[logreg_metric_to_plot], # MODIFIED
                                          marker="o",
                                          linestyle="-",
                                          label=sp,
@@ -585,12 +607,12 @@ def main():
                                          alpha=0.8)
 
                 # Add horizontal line for Exact PCA reference for this superpopulation
-                exact_pca_sp_acc_series = df_exact_pca_metrics[
+                exact_pca_sp_acc_series = df_exact_pca_metrics[ # Ensure df_exact_pca_metrics has the new normalized metric
                     (df_exact_pca_metrics["superpopulation"] == sp)
-                ]["LogReg_Balanced_Accuracy_CV"]
+                ][logreg_metric_to_plot] # MODIFIED
 
                 if not exact_pca_sp_acc_series.empty and pd.notna(exact_pca_sp_acc_series.iloc[0]):
-                    exact_pca_val = exact_pca_sp_acc_series.iloc[0]
+                    exact_pca_val = exact_pca_sp_acc_series.iloc[0] # This is now normalized
                     if xmin_global is not None and xmax_global is not None:
                         current_label = f"{EXACT_PCA_DISPLAY_NAME}" if not exact_pca_legend_added_left else "_nolegend_"
                         ax_left.hlines(exact_pca_val,
@@ -607,8 +629,8 @@ def main():
 
             ax_left.set_title(param_name.replace("eigensnp_", "") + " – per superpopulation")
             ax_left.set_xlabel(param_name.replace("eigensnp_", ""))
-            ax_left.set_ylabel("Balanced Accuracy (CV)")
-            ax_left.set_ylim(0, 1)
+            ax_left.set_ylabel(accuracy_metric_display_name) # MODIFIED
+            ax_left.set_ylim(y_lim_acc_min, y_lim_acc_max) # MODIFIED
             ax_left.grid(True, alpha=0.5)
             if idx == 0:
                 ax_left.legend(title="Superpopulation", fontsize="x-small", loc="best")
@@ -618,7 +640,7 @@ def main():
                 ax_left.axvline(float(default_val), color="grey", linestyle="--", linewidth=1)
 
             # ── right panel: mean / median across superpopulations ────────────────
-            df_agg = (df_param.groupby("swept_param_value_numeric")["LogReg_Balanced_Accuracy_CV"]
+            df_agg = (df_param.groupby("swept_param_value_numeric")[logreg_metric_to_plot] # MODIFIED
                               .agg(["mean", "median"])
                               .reset_index()
                               .sort_values("swept_param_value_numeric"))
@@ -627,19 +649,19 @@ def main():
                               df_agg["mean"],
                               marker="s",
                               linestyle="--",
-                              label="Mean (Swept)") # Clarify this is for swept data
+                              label="Mean (Swept)")
                 ax_right.plot(df_agg["swept_param_value_numeric"],
                               df_agg["median"],
                               marker="^",
                               linestyle=":",
-                              label="Median (Swept)") # Clarify this is for swept data
+                              label="Median (Swept)")
 
-            # Add horizontal lines for Exact PCA mean/median LogReg Balanced Accuracy
-            exact_pca_logreg_overall_mean = df_exact_pca_metrics["LogReg_Balanced_Accuracy_CV"].mean()
-            exact_pca_logreg_overall_median = df_exact_pca_metrics["LogReg_Balanced_Accuracy_CV"].median()
+            # Add horizontal lines for Exact PCA mean/median LogReg Normalized Accuracy
+            exact_pca_logreg_overall_mean = df_exact_pca_metrics[logreg_metric_to_plot].mean() # MODIFIED
+            exact_pca_logreg_overall_median = df_exact_pca_metrics[logreg_metric_to_plot].median() # MODIFIED
 
             if pd.notna(exact_pca_logreg_overall_mean) and xmin_global is not None and xmax_global is not None:
-                ax_right.hlines(exact_pca_logreg_overall_mean,
+                ax_right.hlines(exact_pca_logreg_overall_mean, # This is now normalized
                                 xmin_global,
                                 xmax_global,
                                 color="purple", # Consistent color for Exact PCA Mean
@@ -660,8 +682,8 @@ def main():
 
             ax_right.set_title(param_name.replace("eigensnp_", "") + " – mean/median")
             ax_right.set_xlabel(param_name.replace("eigensnp_", ""))
-            ax_right.set_ylabel("Balanced Accuracy (CV)")
-            ax_right.set_ylim(0, 1)
+            ax_right.set_ylabel(accuracy_metric_display_name) # MODIFIED
+            ax_right.set_ylim(y_lim_acc_min, y_lim_acc_max) # MODIFIED
             ax_right.grid(True, alpha=0.5)
             if idx == 0:
                 ax_right.legend(fontsize="x-small", loc="best")
@@ -675,13 +697,13 @@ def main():
                 except ValueError:
                     pass
 
-        fig_acc.suptitle("Logistic Regression Raw Balanced Accuracy vs. Swept Parameters",
+        fig_acc.suptitle(f"{accuracy_metric_display_name} vs. Swept Parameters", # MODIFIED
                          fontsize=20,
                          y=0.99)
         plt.tight_layout(rect=[0, 0, 1, 0.97])
-        accuracy_plot_filepath = PLOTS_OUTPUT_DIR / "logreg_raw_accuracy_mega_plot.png"
+        accuracy_plot_filepath = PLOTS_OUTPUT_DIR / "logreg_normalized_skill_accuracy_mega_plot.png" # MODIFIED
         plt.savefig(accuracy_plot_filepath)
-        print(f"  Saved logistic regression accuracy mega-plot: {accuracy_plot_filepath}")
+        print(f"  Saved {accuracy_metric_display_name} mega-plot: {accuracy_plot_filepath}") # MODIFIED
         plt.close(fig_acc)
 
     # 6. Plotting - Runtimes Summary (Mega-Plot)

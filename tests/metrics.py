@@ -251,6 +251,7 @@ def compute_metrics_for_superpopulations(
         "Number_of_samples",
         "Number_of_subpopulations",
         "LogReg_Balanced_Accuracy_CV",
+        "LogReg_Normalized_Accuracy_CV",
         "Mean_multivariate_Jensen_Shannon_divergence_nats",
         "Median_multivariate_Jensen_Shannon_divergence_nats",
         "Average_silhouette",
@@ -272,10 +273,25 @@ def compute_metrics_for_superpopulations(
 
         # Logistic Regression Balanced Accuracy (CV)
         unique_subpops, _ = np.unique(subpopulation_labels, return_counts=True) # _ signifies counts are not used here
+        num_unique_subpops = len(unique_subpops)
         
-        logreg_balanced_accuracy_cv = logistic_regression_balanced_accuracy(
+        logreg_balanced_accuracy_cv_raw = logistic_regression_balanced_accuracy(
             pc_matrix, subpopulation_labels
         )
+
+        # Normalized Logistic Regression Balanced Accuracy
+        if num_unique_subpops > 1:
+            chance_performance = 1.0 / num_unique_subpops
+            # Ensure logreg_balanced_accuracy_cv_raw is not NaN before comparison
+            if pd.notna(logreg_balanced_accuracy_cv_raw) and logreg_balanced_accuracy_cv_raw >= chance_performance:
+                logreg_normalized_accuracy_cv = (
+                    logreg_balanced_accuracy_cv_raw - chance_performance
+                ) / (1.0 - chance_performance)
+            else: # if raw accuracy is below chance or NaN, normalized is 0 or NaN
+                logreg_normalized_accuracy_cv = 0.0 if pd.notna(logreg_balanced_accuracy_cv_raw) else np.nan
+        else: # single subpopulation, accuracy is undefined
+            logreg_normalized_accuracy_cv = np.nan
+
 
         # Pairwise JSDs
         jsd_values: List[float] = []
@@ -308,26 +324,31 @@ def compute_metrics_for_superpopulations(
         )
 
         # TSV row
-        tsv_lines.append(
-            "\t".join(
-                map(
-                    str,
-                    [
-                        superpopulation_code,
-                        len(subset),
-                        len(unique_subpops),
-                        f"{logreg_balanced_accuracy_cv:.6f}",
-                        f"{mean_jsd:.6f}",
-                        f"{median_jsd:.6f}",
-                        f"{average_silhouette:.6f}",
-                        f"{median_silhouette:.6f}",
-                        f"{mean_contrastive:.6f}",
-                        f"{median_contrastive:.6f}",
-                        f"{hdbscan_ami:.6f}",
-                    ],
-                )
-            )
-        )
+        row_values = [
+            superpopulation_code,
+            len(subset),
+            num_unique_subpops, # Use num_unique_subpops here
+            logreg_balanced_accuracy_cv_raw,
+            logreg_normalized_accuracy_cv,
+            mean_jsd,
+            median_jsd,
+            average_silhouette,
+            median_silhouette,
+            mean_contrastive,
+            median_contrastive,
+            hdbscan_ami,
+        ]
+
+        formatted_values = []
+        for val in row_values:
+            if isinstance(val, float):
+                if np.isnan(val):
+                    formatted_values.append("NaN")
+                else:
+                    formatted_values.append(f"{val:.6f}")
+            else:
+                formatted_values.append(str(val))
+        tsv_lines.append("\t".join(formatted_values))
 
     # 3 ─── Write TSV
     with open(output_tsv_path, "w", encoding="utf-8") as handle:
