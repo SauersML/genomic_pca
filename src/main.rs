@@ -2,7 +2,7 @@
 // main.rs
 
 // --- Local Module Declarations ---
-mod vcf;          // 
+mod vcf;
 mod prepare;
 
 // --- External Crate Imports ---
