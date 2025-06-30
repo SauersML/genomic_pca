@@ -97,6 +97,26 @@ This will generate files like:
   * `pca_output/run1.eigenvalues.tsv` (variance explained by PCs)
   * `pca_output/run1.loadings.tsv` (variant loadings)
 
+#### Biobank example
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+source "$HOME/.cargo/env" && \
+git clone https://github.com/SauersML/genomic_pca && \
+cd genomic_pca && \
+echo "1 1 500000000" > ../ld_blocks.txt && \
+rustup override set nightly && \
+echo "Building genomic_pca with the 'openblas-faer' feature... This may take several minutes." && \
+cargo build --release --features openblas-faer && \
+echo "Running EigenSNP training..." && \
+./target/release/genomic_pca \
+  --eigensnp \
+  --bed-file ../arrays.bed \
+  --ld-block-file ../ld_blocks.txt \
+  --out ../eigensnp_results && \
+echo "EigenSNP training complete. Results are in the parent directory with the prefix 'eigensnp_results'." && \
+cd ..
+```
+
 
 ### Testing
 
