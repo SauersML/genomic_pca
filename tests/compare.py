@@ -15,6 +15,7 @@ from scipy.spatial.distance import pdist
 from scipy.linalg import subspace_angles
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegressionCV
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import StratifiedKFold
 from tqdm import tqdm
@@ -30,9 +31,9 @@ PCAONE_EXECUTABLE = PCAONE_SOURCE_DIR / "PCAone"
 PCAONE_GIT_URL = "https://github.com/Zilong-Li/PCAone.git"
 
 # Input Data
-RAW_BED_PREFIX = CWD.parent / "data" / "chr22_subset50"
+RAW_DATA_PREFIX = CWD.parent / "data" / "chr22_subset50"
 # This will be the new, filtered dataset used by all tools
-QC_BED_PREFIX = CWD / "comparison_outputs" / "chr22_subset50.qc"
+QC_DATA_PREFIX = CWD / "comparison_outputs" / "chr22_subset50.qc"
 SAMPLE_INFO_FILE = CWD / "igsr_samples.tsv"
 LD_BLOCK_FILE = CWD / "pyrho_EAS_LD_blocks.bed"
 
@@ -45,47 +46,54 @@ PCAONE_OUTPUT_DIR = MAIN_OUTPUT_DIR / "pcaone_pca"
 
 # PCA Parameters
 K_COMPONENTS = 10
+CPU_COUNT = os.cpu_count()
 
 # --- Phase 1: Setup and Tool Preparation ---
 
 def run_command(cmd, work_dir, description):
-    """A robust helper to run external commands, printing output directly."""
+    """A robust helper to run external commands, capturing output."""
     print(f"--- Running: {description} ---")
     print(f"CMD: {' '.join(map(str, cmd))}")
     print(f"DIR: {work_dir}")
     
     start_time = time.time()
     try:
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             cwd=work_dir,
             check=True,
-            text=True
+            text=True,
+            capture_output=True
         )
+        if result.stdout: print(result.stdout)
+        if result.stderr: print(result.stderr, file=sys.stderr)
+        
         duration = time.time() - start_time
         print(f"--- Success: {description} finished in {duration:.2f}s ---")
         return True
     except FileNotFoundError:
-        print(f"ERROR: Command not found: {cmd[0]}")
+        print(f"ERROR: Command not found: {cmd[0]}", file=sys.stderr)
         return False
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: {description} failed with exit code {e.returncode}.")
+        print(f"ERROR: {description} failed with exit code {e.returncode}.", file=sys.stderr)
+        print(f"STDOUT:\n{e.stdout}", file=sys.stderr)
+        print(f"STDERR:\n{e.stderr}", file=sys.stderr)
         return False
     except Exception as e:
-        print(f"ERROR: An unexpected error occurred during '{description}': {e}")
+        print(f"ERROR: An unexpected error occurred during '{description}': {e}", file=sys.stderr)
         return False
 
-def prepare_plink_data(prefix_path):
-    """Checks for PLINK files and unzips them if necessary."""
-    print("Checking for PLINK data files...")
+def prepare_input_data(prefix_path):
+    """Checks for genetic data files (.bed, .bim, .fam) and unzips them if necessary."""
+    print("Checking for input data files...")
     extensions = [".bed", ".bim", ".fam"]
     all_present = all((prefix_path.with_suffix(ext)).exists() for ext in extensions)
 
     if all_present:
-        print("PLINK files found.")
+        print("Input data files found.")
         return True
 
-    print("One or more PLINK files missing. Checking for zip archives...")
+    print("One or more input files missing. Checking for zip archives...")
     try:
         for ext in extensions:
             zip_path = prefix_path.with_suffix(f"{ext}.zip")
@@ -95,94 +103,61 @@ def prepare_plink_data(prefix_path):
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(target_path.parent)
             elif not target_path.exists():
-                 print(f"ERROR: Cannot find {target_path} or {zip_path}")
-                 return False
+                print(f"ERROR: Cannot find {target_path} or {zip_path}", file=sys.stderr)
+                return False
         return True
     except Exception as e:
-        print(f"ERROR: Failed to prepare PLINK data: {e}")
+        print(f"ERROR: Failed to prepare input data: {e}", file=sys.stderr)
         return False
 
-def filter_bed_for_maf(raw_prefix, qc_prefix):
+def filter_monomorphic_sites(raw_prefix, qc_prefix):
     """
-    Fast, dependency-free Python function to filter a PLINK fileset for MAF > 0.
+    Filters a genetic dataset to remove monomorphic sites (MAF=0), using
+    bed-reader for efficient MAF calculation.
     """
-    print("\n--- Pre-processing: Filtering out monomorphic sites using Python ---")
+    print("\n--- Pre-processing: Filtering for polymorphic sites ---")
     try:
-        # Read metadata
-        fam_df = pd.read_csv(f"{raw_prefix}.fam", sep=r'\s+', header=None)
-        n_samples = len(fam_df)
+        print("Calculating MAF using bed-reader...")
+        bed = open_bed(f"{raw_prefix}.bed", count_A1=False)
+        n_snps = bed.sid_count
+        
+        chunk_size = 10000 
+        keep_indices = []
+        for i in tqdm(range(0, n_snps, chunk_size), desc="Calculating MAF"):
+            g_chunk = bed.read(index=np.s_[:, i:min(i + chunk_size, n_snps)], dtype='float32')
+            allele_freq = np.nanmean(g_chunk, axis=0) / 2.0
+            maf = np.minimum(allele_freq, 1 - allele_freq)
+            chunk_indices = np.arange(i, i + g_chunk.shape[1])
+            polymorphic_in_chunk = chunk_indices[maf > 0]
+            keep_indices.extend(polymorphic_in_chunk)
+
+        print(f"Identified {len(keep_indices)} polymorphic SNPs out of {n_snps}.")
+
+        print("Writing filtered dataset...")
         bim_df = pd.read_csv(f"{raw_prefix}.bim", sep='\t', header=None)
-        n_snps = len(bim_df)
-        
-        # PLINK bed files have 3 magic bytes at the start
-        bed_header = b'\x6c\x1b\x01'
-        bytes_per_snp = (n_samples + 3) // 4
-        
-        snp_indices_to_keep = []
-        
-        with open(f"{raw_prefix}.bed", "rb") as f_in:
-            header = f_in.read(3)
-            if header != bed_header:
-                raise ValueError("Invalid .bed file format.")
-            
-            # Calculate MAF for all SNPs
-            for i in tqdm(range(n_snps), desc="Calculating MAF"):
-                snp_data = f_in.read(bytes_per_snp)
-                if len(snp_data) != bytes_per_snp:
-                    raise IOError("Unexpected end of .bed file.")
-                
-                allele_sum = 0
-                valid_genotypes = 0
-                
-                # Unpack genotypes
-                for byte_idx in range(bytes_per_snp):
-                    byte = snp_data[byte_idx]
-                    for bit_pair_idx in range(4):
-                        sample_idx = byte_idx * 4 + bit_pair_idx
-                        if sample_idx < n_samples:
-                            genotype = (byte >> (bit_pair_idx * 2)) & 0b11
-                            # PLINK coding: 00=Homozygous A1, 01=Missing, 10=Heterozygous, 11=Homozygous A2
-                            if genotype == 0b00: # Hom A1
-                                allele_sum += 0
-                                valid_genotypes += 1
-                            elif genotype == 0b10: # Het
-                                allele_sum += 1
-                                valid_genotypes += 1
-                            elif genotype == 0b11: # Hom A2
-                                allele_sum += 2
-                                valid_genotypes += 1
-                
-                if valid_genotypes > 0:
-                    allele_freq = allele_sum / (2 * valid_genotypes)
-                    maf = min(allele_freq, 1 - allele_freq)
-                    if maf > 0:
-                        snp_indices_to_keep.append(i)
-
-        print(f"Identified {len(snp_indices_to_keep)} polymorphic SNPs out of {n_snps}.")
-
-        # Write the new filtered fileset
-        # .bim file
-        bim_df.iloc[snp_indices_to_keep].to_csv(f"{qc_prefix}.bim", sep='\t', header=False, index=False)
-        # .fam file (is just a copy)
+        bim_df.iloc[keep_indices].to_csv(f"{qc_prefix}.bim", sep='\t', header=False, index=False)
         shutil.copy(f"{raw_prefix}.fam", f"{qc_prefix}.fam")
         
-        # .bed file
+        n_samples = bed.iid_count
+        bytes_per_snp = (n_samples + 3) // 4
+        
         with open(f"{raw_prefix}.bed", "rb") as f_in, open(f"{qc_prefix}.bed", "wb") as f_out:
-            f_in.seek(0)
-            f_out.write(f_in.read(3)) # Copy header
+            f_out.write(f_in.read(3))
             
-            current_snp_idx = 0
+            current_keep_idx_ptr = 0
             for i in tqdm(range(n_snps), desc="Writing filtered .bed"):
                 snp_data = f_in.read(bytes_per_snp)
-                if current_snp_idx < len(snp_indices_to_keep) and i == snp_indices_to_keep[current_snp_idx]:
+                if current_keep_idx_ptr < len(keep_indices) and i == keep_indices[current_keep_idx_ptr]:
                     f_out.write(snp_data)
-                    current_snp_idx += 1
+                    current_keep_idx_ptr += 1
         
-        print("--- Successfully created QC'd PLINK dataset ---")
+        print("--- Successfully created QC'd dataset ---")
         return True
 
     except Exception as e:
-        print(f"ERROR: Python MAF filtering failed: {e}")
+        print(f"ERROR: MAF filtering failed: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         return False
 
 def prepare_sample_info():
@@ -191,59 +166,47 @@ def prepare_sample_info():
         print("Sample info file found locally.")
         return True
     
-    print(f"ERROR: Sample info file not found at {SAMPLE_INFO_FILE}")
-    print("Please ensure 'igsr_samples.tsv' is in the current directory.")
+    print(f"ERROR: Sample info file not found at {SAMPLE_INFO_FILE}", file=sys.stderr)
+    print("Please ensure 'igsr_samples.tsv' is in the current directory.", file=sys.stderr)
     return False
 
 def setup_pcaone():
-    """Clones and builds PCAone with OpenBLAS if the executable is not found."""
+    """Clones and builds PCAone if the executable is not found."""
     if PCAONE_EXECUTABLE.exists():
         print("PCAone executable found. Skipping build.")
         return True
 
     print("PCAone executable not found. Attempting to clone and build...")
     if not PCAONE_SOURCE_DIR.exists():
-        if not run_command(
-            ["git", "clone", PCAONE_GIT_URL, str(PCAONE_SOURCE_DIR)],
-            CWD,
-            "Git Clone PCAone"
-        ):
+        if not run_command(["git", "clone", PCAONE_GIT_URL, str(PCAONE_SOURCE_DIR)], CWD, "Git Clone PCAone"):
             return False
     
-    print("Building PCAone with OpenBLAS...")
-    if not run_command(
-        ["make", "OPENBLAS=1", "-j", str(os.cpu_count())],
-        PCAONE_SOURCE_DIR,
-        "Build PCAone with OpenBLAS"
-    ):
+    print("Building PCAone...")
+    if not run_command(["make", "-j", str(CPU_COUNT)], PCAONE_SOURCE_DIR, "Build PCAone"):
         return False
         
     if not PCAONE_EXECUTABLE.exists():
-        print("ERROR: PCAone build command succeeded, but executable not found at expected path.")
+        print("ERROR: PCAone build succeeded, but executable not found.", file=sys.stderr)
         return False
         
     return True
 
 def setup_eigensnp():
-    """Checks for the eigensnp executable and builds it with appropriate features if missing."""
+    """Checks for the eigensnp executable and builds it if missing."""
     if EIGENSNP_EXECUTABLE.exists():
         print("eigensnp executable found.")
         return True
 
-    print(f"eigensnp executable not found at {EIGENSNP_EXECUTABLE}. Attempting to build...")
+    print(f"eigensnp executable not found. Attempting to build...", file=sys.stderr)
     if not (EIGENSNP_PROJECT_DIR / "Cargo.toml").exists():
-        print(f"ERROR: Cargo.toml not found in {EIGENSNP_PROJECT_DIR}. Cannot build.")
+        print(f"ERROR: Cargo.toml not found in {EIGENSNP_PROJECT_DIR}. Cannot build.", file=sys.stderr)
         return False
 
-    if not run_command(
-        ["cargo", "build", "--release", "--features", "openblas-faer"],
-        EIGENSNP_PROJECT_DIR,
-        "Build eigensnp (cargo build --release --features openblas-faer)"
-    ):
+    if not run_command(["cargo", "build", "--release"], EIGENSNP_PROJECT_DIR, "Build eigensnp (cargo build --release)"):
         return False
 
     if not EIGENSNP_EXECUTABLE.exists():
-        print("ERROR: 'cargo build' ran, but the executable is still not at the expected path.")
+        print("ERROR: 'cargo build' ran, but the executable is still not at the expected path.", file=sys.stderr)
         return False
 
     print("eigensnp successfully built.")
@@ -265,17 +228,15 @@ def _hwe_pval(a_aa, a_ab, a_bb):
     return 1.0 - chi2_dist.cdf(chi2, 1)
 
 def run_reference_pca():
-    """
-    Runs a full, exact PCA by building the GRM on the QC'd dataset.
-    """
+    """Runs a full, exact PCA by building the GRM on the QC'd dataset."""
     print("\n--- Running Reference (Exact) PCA ---")
     REF_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     start_time = time.time()
     try:
-        bed = open_bed(f"{QC_BED_PREFIX}.bed", count_A1=False)
+        bed = open_bed(f"{QC_DATA_PREFIX}.bed", count_A1=False)
         n_samples, n_variants = bed.iid_count, bed.sid_count
-        fam = pd.read_csv(f"{QC_BED_PREFIX}.fam", sep=r"\s+", header=None, usecols=[1], names=["SampleID"])
+        fam = pd.read_csv(f"{QC_DATA_PREFIX}.fam", sep=r"\s+", header=None, usecols=[1], names=["SampleID"])
 
         gram = np.zeros((n_samples, n_samples), dtype=np.float64)
         kept_variants = 0
@@ -307,9 +268,8 @@ def run_reference_pca():
         evals_all, evecs_all = eigh(gram)
         
         idx = np.argsort(evals_all)[::-1]
-        evals_all, evecs_all = evals_all[idx], evecs_all[:, idx]
+        pcs = evecs_all[:, idx][:, :K_COMPONENTS]
         
-        pcs = evecs_all[:, :K_COMPONENTS]
         pc_cols = [f"PC{i+1}" for i in range(K_COMPONENTS)]
         df_pcs = pd.DataFrame(pcs, columns=pc_cols)
         df_pcs.insert(0, "SampleID", fam.SampleID)
@@ -322,7 +282,7 @@ def run_reference_pca():
         return {"tool": "Reference", "runtime": duration, "scores_path": output_path, "success": True}
 
     except Exception as e:
-        print(f"ERROR: Reference PCA failed: {e}")
+        print(f"ERROR: Reference PCA failed: {e}", file=sys.stderr)
         return {"tool": "Reference", "runtime": -1, "scores_path": None, "success": False}
 
 def run_eigensnp():
@@ -334,10 +294,10 @@ def run_eigensnp():
     cmd = [
         str(EIGENSNP_EXECUTABLE),
         "--eigensnp",
-        "--bed-file", f"{QC_BED_PREFIX}.bed",
+        "--bed-file", f"{QC_DATA_PREFIX}.bed",
         "--out", str(output_prefix),
         "--eigensnp-k-global", str(K_COMPONENTS),
-        "--threads", str(os.cpu_count()),
+        "--threads", str(CPU_COUNT),
         "--log-level", "Warn",
         "--eigensnp-min-call-rate", "0.98",
         "--eigensnp-min-maf", "0.01",
@@ -351,7 +311,7 @@ def run_eigensnp():
     
     scores_path = output_prefix.with_suffix(".eigensnp.pca.tsv")
     if success and not scores_path.exists():
-        print(f"ERROR: eigensnp ran but output file not found at {scores_path}")
+        print(f"ERROR: eigensnp ran but output file not found at {scores_path}", file=sys.stderr)
         success = False
 
     return {"tool": "eigensnp", "runtime": duration, "scores_path": scores_path if success else None, "success": success}
@@ -364,9 +324,10 @@ def run_pcaone():
     
     cmd = [
         str(PCAONE_EXECUTABLE),
-        "-b", str(QC_BED_PREFIX),
+        "-b", str(QC_DATA_PREFIX),
         "-k", str(K_COMPONENTS),
         "-o", str(output_prefix),
+        "-n", str(CPU_COUNT),
     ]
     
     start_time = time.time()
@@ -375,7 +336,7 @@ def run_pcaone():
     
     scores_path = output_prefix.with_suffix(".eigvecs")
     if success and not scores_path.exists():
-        print(f"ERROR: PCAone ran but output file not found at {scores_path}")
+        print(f"ERROR: PCAone ran but output file not found at {scores_path}", file=sys.stderr)
         success = False
 
     return {"tool": "PCAone", "runtime": duration, "scores_path": scores_path if success else None, "success": success}
@@ -389,7 +350,7 @@ def load_and_standardize_scores(filepath, tool_name, sample_order):
         df = pd.read_csv(filepath, sep=r'\s+', header=None)
         df.columns = [f"PC{i+1}" for i in range(df.shape[1])]
         df.insert(0, "SampleID", sample_order)
-    else: # Reference and eigensnp
+    else:
         df = pd.read_csv(filepath, sep='\t')
         df['SampleID'] = df['SampleID'].astype(str)
         df = df.set_index('SampleID').loc[sample_order].reset_index()
@@ -398,7 +359,7 @@ def load_and_standardize_scores(filepath, tool_name, sample_order):
     return df[pc_cols_to_keep]
 
 def calculate_logreg_accuracy(approx_scores_df, ref_scores_df, sample_info_df):
-    """Calculates the median normalized balanced accuracy."""
+    """Calculates the median normalized balanced accuracy using OneVsRestClassifier."""
     print("Calculating Logistic Regression Accuracy...")
     df = approx_scores_df.merge(sample_info_df, on="SampleID")
     pc_cols = [f"PC{i+1}" for i in range(K_COMPONENTS)]
@@ -423,15 +384,19 @@ def calculate_logreg_accuracy(approx_scores_df, ref_scores_df, sample_info_df):
         n_classes = len(valid_subpops)
         chance_level = 1.0 / n_classes
         
-        logreg = LogisticRegressionCV(
+        base_logreg = LogisticRegressionCV(
             Cs=10, cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
-            penalty='l2', scoring='balanced_accuracy', multi_class='ovr',
-            max_iter=1000, n_jobs=-1, random_state=42
+            penalty='l2', scoring='balanced_accuracy',
+            max_iter=1000, random_state=42
         )
+        
+        logreg = OneVsRestClassifier(base_logreg, n_jobs=-1)
         
         try:
             logreg.fit(X_scaled, y)
-            balanced_acc = np.mean(list(logreg.scores_.values()))
+            y_pred = logreg.predict(X_scaled)
+            balanced_acc = balanced_accuracy_score(y, y_pred)
+            
             normalized_acc = (balanced_acc - chance_level) / (1.0 - chance_level) if chance_level < 1 else 0.0
             normalized_accuracies.append(normalized_acc)
         except Exception as e:
@@ -470,11 +435,11 @@ def main():
     
     # 1. Setup
     MAIN_OUTPUT_DIR.mkdir(exist_ok=True)
-    if not setup_eigensnp() or not setup_pcaone() or not prepare_plink_data(RAW_BED_PREFIX) or not prepare_sample_info():
+    if not setup_eigensnp() or not setup_pcaone() or not prepare_input_data(RAW_DATA_PREFIX) or not prepare_sample_info():
         sys.exit("Halting due to setup failure.")
 
     # 2. Pre-processing
-    if not filter_bed_for_maf(RAW_BED_PREFIX, QC_BED_PREFIX):
+    if not filter_monomorphic_sites(RAW_DATA_PREFIX, QC_DATA_PREFIX):
         sys.exit("Halting due to MAF filtering failure.")
 
     # 3. Execution
@@ -493,7 +458,7 @@ def main():
         sample_info_df = pd.read_csv(SAMPLE_INFO_FILE, sep='\t', dtype={'Sample name': str})
         sample_info_df = sample_info_df.rename(columns={'Sample name': 'SampleID'})
         
-        ref_fam = pd.read_csv(f"{QC_BED_PREFIX}.fam", sep=r'\s+', header=None, usecols=[1], names=["SampleID"], dtype=str)
+        ref_fam = pd.read_csv(f"{QC_DATA_PREFIX}.fam", sep=r'\s+', header=None, usecols=[1], names=["SampleID"], dtype=str)
         canonical_sample_order = ref_fam.SampleID.tolist()
 
         scores_dfs = {
@@ -501,7 +466,7 @@ def main():
             for res in all_results if res["success"]
         }
     except Exception as e:
-        print(f"ERROR: FATAL ERROR during data loading: {e}")
+        print(f"ERROR: FATAL ERROR during data loading: {e}", file=sys.stderr)
         sys.exit(1)
         
     # 5. Metric Calculation
@@ -524,17 +489,17 @@ def main():
         report_data.append(metrics)
 
     # 6. Reporting
-    print("\n\n====== Final Comparison Report ======")
+    print("\n\n" + "="*20 + " Final Comparison Report " + "="*20)
     report_df = pd.DataFrame(report_data).set_index("Tool")
     
     for col in report_df.columns:
         report_df[col] = pd.to_numeric(report_df[col], errors='coerce')
-        if col != "Runtime (s)":
-             report_df[col] = report_df[col].apply(lambda x: f"{x:.6f}" if pd.notna(x) else "N/A")
+        if "Accuracy" in col or "MSE" in col or "Distance" in col:
+            report_df[col] = report_df[col].apply(lambda x: f"{x:.6f}" if pd.notna(x) else "N/A")
     report_df["Runtime (s)"] = report_df["Runtime (s)"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "FAILED")
 
     print(report_df.to_string())
-    print("\n====== PCA Comparison Suite Finished ======")
+    print("\n" + "="*25 + " PCA Comparison Suite Finished " + "="*25)
 
 if __name__ == "__main__":
     main()
