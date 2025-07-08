@@ -234,6 +234,7 @@ def setup_eigensnp():
         return False
 
     if not run_command(["cargo", "build", "--release"], EIGENSNP_PROJECT_DIR, "Build eigensnp (cargo build --release)"):
+    if not run_command(["cargo", "build", "--release", "--features", "mkl-faer"], EIGENSNP_PROJECT_DIR, "Build eigensnp."):
         return False
 
     if not EIGENSNP_EXECUTABLE.exists():
