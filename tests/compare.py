@@ -315,9 +315,7 @@ def run_eigensnp():
         "--log-level", "Warn",
         "--ld-block-file", str(LD_BLOCK_FILE),
         # Disable internal QC filters
-        "--eigensnp-min-call-rate", "0.0",  # Accept all sites regardless of call rate
-        "--eigensnp-min-maf", "0.0",        # Accept all sites regardless of MAF
-        "--eigensnp-max-hwe-p", "1.0",      # Accept all sites regardless of HWE p-value
+        "--no-filter"
     ]
     
     start_time = time.time()
