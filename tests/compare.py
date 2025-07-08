@@ -32,7 +32,7 @@ PCAONE_GIT_URL = "https://github.com/Zilong-Li/PCAone.git"
 
 # Input Data
 RAW_DATA_PREFIX = CWD.parent / "data" / "chr22_subset50"
-# This will be the new, filtered dataset used by all tools
+# This will be the new, fully filtered dataset used by all tools
 QC_DATA_PREFIX = CWD / "comparison_outputs" / "chr22_subset50.qc"
 SAMPLE_INFO_FILE = CWD / "igsr_samples.tsv"
 LD_BLOCK_FILE = CWD / "pyrho_EAS_LD_blocks.bed"
@@ -44,9 +44,12 @@ REF_OUTPUT_DIR = MAIN_OUTPUT_DIR / "ref_pca"
 EIGENSNP_OUTPUT_DIR = MAIN_OUTPUT_DIR / "eigensnp_pca"
 PCAONE_OUTPUT_DIR = MAIN_OUTPUT_DIR / "pcaone_pca"
 
-# PCA Parameters
+# PCA & QC Parameters
 K_COMPONENTS = 10
 CPU_COUNT = os.cpu_count()
+QC_MIN_CALL_RATE = 0.98
+QC_MIN_MAF = 0.01
+QC_MAX_HWE_P = 1e-6
 
 # --- Phase 1: Setup and Tool Preparation ---
 
@@ -110,28 +113,56 @@ def prepare_input_data(prefix_path):
         print(f"ERROR: Failed to prepare input data: {e}", file=sys.stderr)
         return False
 
-def filter_monomorphic_sites(raw_prefix, qc_prefix):
+def _hwe_pval(a_aa, a_ab, a_bb):
+    """Helper to calculate Hardy-Weinberg equilibrium p-value."""
+    n = a_aa + a_ab + a_bb
+    if n == 0: return 1.0
+    p = (2 * a_aa + a_ab) / (2 * n)
+    if p == 0 or p == 1: return 1.0
+    q = 1.0 - p
+    exp = np.array([n * p * p, 2 * n * p * q, n * q * q])
+    obs = np.array([a_aa, a_ab, a_bb])
+    if (exp == 0).any(): return 0.0
+    chi2 = ((obs - exp)**2 / exp).sum()
+    return 1.0 - chi2_dist.cdf(chi2, 1)
+
+def create_qc_filtered_dataset(raw_prefix, qc_prefix):
     """
-    Filters a genetic dataset to remove monomorphic sites (MAF=0), using
-    bed-reader for efficient MAF calculation.
+    Filters a genetic dataset for polymorphic sites, call rate, MAF, and HWE.
+    This creates a single, definitive dataset that all PCA tools will use.
     """
-    print("\n--- Pre-processing: Filtering for polymorphic sites ---")
+    print("\n--- Pre-processing: Creating a single QC-filtered dataset ---")
     try:
-        print("Calculating MAF using bed-reader...")
+        print("Calculating SNP QC metrics using bed-reader...")
         bed = open_bed(f"{raw_prefix}.bed", count_A1=False)
         n_snps = bed.sid_count
         
-        chunk_size = 10000 
+        chunk_size = 5000
         keep_indices = []
-        for i in tqdm(range(0, n_snps, chunk_size), desc="Calculating MAF"):
+        for i in tqdm(range(0, n_snps, chunk_size), desc="SNP QC Filtering"):
             g_chunk = bed.read(index=np.s_[:, i:min(i + chunk_size, n_snps)], dtype='float32')
+            
+            # Call Rate
+            call_rate = np.nanmean(~np.isnan(g_chunk), axis=0)
+            
+            # MAF
             allele_freq = np.nanmean(g_chunk, axis=0) / 2.0
             maf = np.minimum(allele_freq, 1 - allele_freq)
+            
+            # HWE
+            h0, h1, h2 = np.nansum(g_chunk == 0, axis=0), np.nansum(g_chunk == 1, axis=0), np.nansum(g_chunk == 2, axis=0)
+            hwe_p = np.fromiter((_hwe_pval(aa, ab, bb) for aa, ab, bb in zip(h0, h1, h2)), dtype=float, count=g_chunk.shape[1])
+            
+            # Combine filters
+            ok = (call_rate >= QC_MIN_CALL_RATE) & (maf >= QC_MIN_MAF) & (hwe_p > QC_MAX_HWE_P)
+            
             chunk_indices = np.arange(i, i + g_chunk.shape[1])
-            polymorphic_in_chunk = chunk_indices[maf > 0]
-            keep_indices.extend(polymorphic_in_chunk)
+            qc_passed_in_chunk = chunk_indices[ok]
+            keep_indices.extend(qc_passed_in_chunk)
 
-        print(f"Identified {len(keep_indices)} polymorphic SNPs out of {n_snps}.")
+        print(f"Identified {len(keep_indices)} QC-passing SNPs out of {n_snps}.")
+        if not keep_indices:
+             raise ValueError("No SNPs passed the QC filters. Cannot proceed.")
 
         print("Writing filtered dataset...")
         bim_df = pd.read_csv(f"{raw_prefix}.bim", sep='\t', header=None)
@@ -142,7 +173,7 @@ def filter_monomorphic_sites(raw_prefix, qc_prefix):
         bytes_per_snp = (n_samples + 3) // 4
         
         with open(f"{raw_prefix}.bed", "rb") as f_in, open(f"{qc_prefix}.bed", "wb") as f_out:
-            f_out.write(f_in.read(3))
+            f_out.write(f_in.read(3)) # Copy .bed header
             
             current_keep_idx_ptr = 0
             for i in tqdm(range(n_snps), desc="Writing filtered .bed"):
@@ -155,7 +186,7 @@ def filter_monomorphic_sites(raw_prefix, qc_prefix):
         return True
 
     except Exception as e:
-        print(f"ERROR: MAF filtering failed: {e}", file=sys.stderr)
+        print(f"ERROR: Dataset QC filtering failed: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
         return False
@@ -214,21 +245,11 @@ def setup_eigensnp():
 
 # --- Phase 2: PCA Execution ---
 
-def _hwe_pval(a_aa, a_ab, a_bb):
-    """Helper to calculate Hardy-Weinberg equilibrium p-value."""
-    n = a_aa + a_ab + a_bb
-    if n == 0: return 1.0
-    p = (2 * a_aa + a_ab) / (2 * n)
-    if p == 0 or p == 1: return 1.0
-    q = 1.0 - p
-    exp = np.array([n * p * p, 2 * n * p * q, n * q * q])
-    obs = np.array([a_aa, a_ab, a_bb])
-    if (exp == 0).any(): return 0.0
-    chi2 = ((obs - exp)**2 / exp).sum()
-    return 1.0 - chi2_dist.cdf(chi2, 1)
-
 def run_reference_pca():
-    """Runs a full, exact PCA by building the GRM on the QC'd dataset."""
+    """
+    Runs a full, exact PCA on the pre-filtered QC'd dataset.
+    No internal filtering is needed here.
+    """
     print("\n--- Running Reference (Exact) PCA ---")
     REF_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
@@ -238,33 +259,21 @@ def run_reference_pca():
         n_samples, n_variants = bed.iid_count, bed.sid_count
         fam = pd.read_csv(f"{QC_DATA_PREFIX}.fam", sep=r"\s+", header=None, usecols=[1], names=["SampleID"])
 
-        gram = np.zeros((n_samples, n_samples), dtype=np.float64)
-        kept_variants = 0
+        # Read the entire QC'd genotype matrix
+        X = bed.read(dtype='float32')
         
-        min_call_rate, min_maf, max_hwe_p, min_var_eps = 0.98, 0.01, 1e-6, 1e-9
-        chunk_size = 2000
+        # Center and impute mean for missing values
+        col_means = np.nanmean(X, axis=0)
+        X -= col_means
+        X = np.nan_to_num(X, copy=False)
 
-        for i in tqdm(range(0, n_variants, chunk_size), desc="Building GRM"):
-            X = bed.read(index=np.s_[:, i:min(i + chunk_size, n_variants)], dtype='float32', order='C')
-
-            call_rate = np.nanmean(~np.isnan(X), axis=0)
-            maf = np.nanmean(X, axis=0) / 2.0
-            maf = np.where(maf > 0.5, 1 - maf, maf)
-            h0, h1, h2 = np.nansum(X == 0, axis=0), np.nansum(X == 1, axis=0), np.nansum(X == 2, axis=0)
-            hwe_p = np.fromiter((_hwe_pval(aa, ab, bb) for aa, ab, bb in zip(h0, h1, h2)), dtype=float, count=X.shape[1])
-            var = np.nanvar(X, axis=0, ddof=1)
-            ok = (call_rate >= min_call_rate) & (maf >= min_maf) & (hwe_p > max_hwe_p) & (var > min_var_eps)
-
-            if ok.any():
-                X_good = X[:, ok]
-                X_good -= np.nanmean(X_good, axis=0)
-                X_good = np.nan_to_num(X_good, copy=False)
-                gram += X_good @ X_good.T
-                kept_variants += X_good.shape[1]
-
-        if kept_variants == 0: raise ValueError("No variants passed QC for reference PCA.")
+        # Build the GRM
+        print("Building GRM...")
+        gram = X @ X.T
+        gram /= n_variants
         
-        gram /= kept_variants
+        # Eigendecomposition
+        print("Performing eigendecomposition...")
         evals_all, evecs_all = eigh(gram)
         
         idx = np.argsort(evals_all)[::-1]
@@ -286,11 +295,16 @@ def run_reference_pca():
         return {"tool": "Reference", "runtime": -1, "scores_path": None, "success": False}
 
 def run_eigensnp():
-    """Runs the eigensnp tool on the QC'd dataset."""
+    """
+    Runs the eigensnp tool on the QC'd dataset.
+    Internal QC filters are disabled to ensure a fair comparison.
+    """
     print("\n--- Running eigensnp ---")
     EIGENSNP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_prefix = EIGENSNP_OUTPUT_DIR / "eigensnp_results"
     
+    # NOTE: We disable internal filtering by setting thresholds to non-restrictive values.
+    # This is CRUCIAL for a fair comparison, as QC is now done in the pre-processing step.
     cmd = [
         str(EIGENSNP_EXECUTABLE),
         "--eigensnp",
@@ -299,10 +313,11 @@ def run_eigensnp():
         "--eigensnp-k-global", str(K_COMPONENTS),
         "--threads", str(CPU_COUNT),
         "--log-level", "Warn",
-        "--eigensnp-min-call-rate", "0.98",
-        "--eigensnp-min-maf", "0.01",
-        "--eigensnp-max-hwe-p", "1e-6",
-        "--ld-block-file", str(LD_BLOCK_FILE)
+        "--ld-block-file", str(LD_BLOCK_FILE),
+        # Disable internal QC filters
+        "--eigensnp-min-call-rate", "0.0",  # Accept all sites regardless of call rate
+        "--eigensnp-min-maf", "0.0",        # Accept all sites regardless of MAF
+        "--eigensnp-max-hwe-p", "1.0",      # Accept all sites regardless of HWE p-value
     ]
     
     start_time = time.time()
@@ -317,14 +332,17 @@ def run_eigensnp():
     return {"tool": "eigensnp", "runtime": duration, "scores_path": scores_path if success else None, "success": success}
 
 def run_pcaone():
-    """Runs the PCAone tool on the QC'd dataset."""
+    """
+    Runs the PCAone tool on the pre-filtered QC'd dataset.
+    This is now a fair comparison.
+    """
     print("\n--- Running PCAone ---")
     PCAONE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_prefix = PCAONE_OUTPUT_DIR / "pcaone_results"
     
     cmd = [
         str(PCAONE_EXECUTABLE),
-        "-b", str(QC_DATA_PREFIX),
+        "-b", str(QC_DATA_PREFIX), # Use the same QC'd data
         "-k", str(K_COMPONENTS),
         "-o", str(output_prefix),
         "-n", str(CPU_COUNT),
@@ -348,6 +366,8 @@ def load_and_standardize_scores(filepath, tool_name, sample_order):
     print(f"Loading scores for {tool_name} from {filepath}...")
     if tool_name == "PCAone":
         df = pd.read_csv(filepath, sep=r'\s+', header=None)
+        # PCAone might produce more than K components, so truncate
+        df = df.iloc[:, :K_COMPONENTS]
         df.columns = [f"PC{i+1}" for i in range(df.shape[1])]
         df.insert(0, "SampleID", sample_order)
     else:
@@ -355,14 +375,23 @@ def load_and_standardize_scores(filepath, tool_name, sample_order):
         df['SampleID'] = df['SampleID'].astype(str)
         df = df.set_index('SampleID').loc[sample_order].reset_index()
     
-    pc_cols_to_keep = ['SampleID'] + [f"PC{i+1}" for i in range(K_COMPONENTS)]
-    return df[pc_cols_to_keep]
-
-def calculate_logreg_accuracy(approx_scores_df, ref_scores_df, sample_info_df):
-    """Calculates the median normalized balanced accuracy using OneVsRestClassifier."""
-    print("Calculating Logistic Regression Accuracy...")
-    df = approx_scores_df.merge(sample_info_df, on="SampleID")
+    # Ensure exactly K components are used for comparison
     pc_cols = [f"PC{i+1}" for i in range(K_COMPONENTS)]
+    if len(df.columns) - 1 < K_COMPONENTS:
+        print(f"WARNING: {tool_name} produced fewer than {K_COMPONENTS} PCs. Comparison will use {len(df.columns) - 1} PCs.", file=sys.stderr)
+        pc_cols = [col for col in df.columns if col.startswith('PC')]
+    
+    return df[['SampleID'] + pc_cols]
+
+
+def calculate_logreg_accuracy(scores_df, sample_info_df):
+    """
+    Calculates the median normalized balanced accuracy for a given set of PC scores.
+    This is an absolute measure of the utility of the PCs for classification.
+    """
+    print(f"Calculating Logistic Regression Accuracy for {scores_df.attrs.get('tool_name', 'Unknown Tool')}...")
+    df = scores_df.merge(sample_info_df, on="SampleID")
+    pc_cols = [col for col in scores_df.columns if col.startswith('PC')]
     
     normalized_accuracies = []
     
@@ -374,7 +403,7 @@ def calculate_logreg_accuracy(approx_scores_df, ref_scores_df, sample_info_df):
         valid_subpops = subpop_counts[subpop_counts >= 2]
         
         if len(valid_subpops) < 2:
-            print(f"Skipping superpop '{superpop}': Not enough sub-populations with >=2 samples.")
+            # print(f"Skipping superpop '{superpop}': Not enough sub-populations with >=2 samples.")
             continue
             
         df_super_filt = df_super[df_super['Population code'].isin(valid_subpops.index)]
@@ -406,9 +435,14 @@ def calculate_logreg_accuracy(approx_scores_df, ref_scores_df, sample_info_df):
 
 def calculate_distance_mse(approx_scores_df, ref_scores_df):
     """Calculates MSE between Z-normalized pairwise distance matrices."""
-    print("Calculating Pairwise Distance MSE...")
-    pc_cols = [f"PC{i+1}" for i in range(K_COMPONENTS)]
-    ref_mat, approx_mat = ref_scores_df[pc_cols].values, approx_scores_df[pc_cols].values
+    print(f"Calculating Pairwise Distance MSE vs Reference for {approx_scores_df.attrs.get('tool_name', 'Unknown Tool')}...")
+    pc_cols = [col for col in ref_scores_df.columns if col.startswith('PC')]
+    
+    # Ensure both dataframes have the same columns for comparison
+    approx_pc_cols = [col for col in approx_scores_df.columns if col.startswith('PC')]
+    common_cols = list(set(pc_cols) & set(approx_pc_cols))
+    
+    ref_mat, approx_mat = ref_scores_df[common_cols].values, approx_scores_df[common_cols].values
     
     ref_dists = pdist(ref_mat, 'euclidean')
     approx_dists = pdist(approx_mat, 'euclidean')
@@ -420,10 +454,15 @@ def calculate_distance_mse(approx_scores_df, ref_scores_df):
 
 def calculate_subspace_distance(approx_scores_df, ref_scores_df):
     """Calculates the sine of the largest principal angle between PC subspaces."""
-    print("Calculating Subspace Distance...")
-    pc_cols = [f"PC{i+1}" for i in range(K_COMPONENTS)]
-    q_ref, _ = np.linalg.qr(ref_scores_df[pc_cols].values)
-    q_approx, _ = np.linalg.qr(approx_scores_df[pc_cols].values)
+    print(f"Calculating Subspace Distance vs Reference for {approx_scores_df.attrs.get('tool_name', 'Unknown Tool')}...")
+    pc_cols = [col for col in ref_scores_df.columns if col.startswith('PC')]
+
+    # Ensure both dataframes have the same columns for comparison
+    approx_pc_cols = [col for col in approx_scores_df.columns if col.startswith('PC')]
+    common_cols = list(set(pc_cols) & set(approx_pc_cols))
+
+    q_ref, _ = np.linalg.qr(ref_scores_df[common_cols].values)
+    q_approx, _ = np.linalg.qr(approx_scores_df[common_cols].values)
     angles = subspace_angles(q_ref, q_approx)
     return np.sin(np.max(angles))
 
@@ -439,8 +478,8 @@ def main():
         sys.exit("Halting due to setup failure.")
 
     # 2. Pre-processing
-    if not filter_monomorphic_sites(RAW_DATA_PREFIX, QC_DATA_PREFIX):
-        sys.exit("Halting due to MAF filtering failure.")
+    if not create_qc_filtered_dataset(RAW_DATA_PREFIX, QC_DATA_PREFIX):
+        sys.exit("Halting due to dataset QC filtering failure.")
 
     # 3. Execution
     ref_result = run_reference_pca()
@@ -461,37 +500,57 @@ def main():
         ref_fam = pd.read_csv(f"{QC_DATA_PREFIX}.fam", sep=r'\s+', header=None, usecols=[1], names=["SampleID"], dtype=str)
         canonical_sample_order = ref_fam.SampleID.tolist()
 
-        scores_dfs = {
-            res["tool"]: load_and_standardize_scores(res["scores_path"], res["tool"], canonical_sample_order)
-            for res in all_results if res["success"]
-        }
+        scores_dfs = {}
+        for res in all_results:
+            if res["success"]:
+                df = load_and_standardize_scores(res["scores_path"], res["tool"], canonical_sample_order)
+                df.attrs['tool_name'] = res["tool"] # Attach tool name for logging
+                scores_dfs[res["tool"]] = df
+            
     except Exception as e:
         print(f"ERROR: FATAL ERROR during data loading: {e}", file=sys.stderr)
         sys.exit(1)
         
     # 5. Metric Calculation
     print("\n--- Calculating Comparison Metrics ---")
-    report_data = [{"Tool": "Reference", "Runtime (s)": ref_result['runtime'], "LogReg Accuracy (Median Norm.)": 1.0, "Pairwise Distance MSE": 0.0, "Subspace Distance": 0.0}]
-    
+    report_data = []
     ref_scores = scores_dfs.get("Reference")
-    
-    for tool_result in [eigensnp_result, pcaone_result]:
+
+    for tool_result in all_results:
         tool_name = tool_result["tool"]
         if not tool_result["success"]:
             report_data.append({"Tool": tool_name, "Runtime (s)": "FAILED", "LogReg Accuracy (Median Norm.)": np.nan, "Pairwise Distance MSE": np.nan, "Subspace Distance": np.nan})
             continue
 
-        approx_scores = scores_dfs.get(tool_name)
+        current_scores = scores_dfs.get(tool_name)
+        if current_scores is None:
+            print(f"WARNING: Scores for {tool_name} could not be loaded. Skipping metrics.", file=sys.stderr)
+            report_data.append({"Tool": tool_name, "Runtime (s)": tool_result['runtime'], "LogReg Accuracy (Median Norm.)": np.nan, "Pairwise Distance MSE": np.nan, "Subspace Distance": np.nan})
+            continue
+        
         metrics = {"Tool": tool_name, "Runtime (s)": tool_result['runtime']}
-        metrics["LogReg Accuracy (Median Norm.)"] = calculate_logreg_accuracy(approx_scores, ref_scores, sample_info_df)
-        metrics["Pairwise Distance MSE"] = calculate_distance_mse(approx_scores, ref_scores)
-        metrics["Subspace Distance"] = calculate_subspace_distance(approx_scores, ref_scores)
+
+        # Absolute metric: Calculated for ALL tools.
+        metrics["LogReg Accuracy (Median Norm.)"] = calculate_logreg_accuracy(current_scores, sample_info_df)
+
+        # Comparative metrics: Calculated vs Reference. For Reference itself, this is 0.
+        if tool_name == "Reference":
+            metrics["Pairwise Distance MSE"] = 0.0
+            metrics["Subspace Distance"] = 0.0
+        else:
+            metrics["Pairwise Distance MSE"] = calculate_distance_mse(current_scores, ref_scores)
+            metrics["Subspace Distance"] = calculate_subspace_distance(current_scores, ref_scores)
+            
         report_data.append(metrics)
 
     # 6. Reporting
     print("\n\n" + "="*20 + " Final Comparison Report " + "="*20)
     report_df = pd.DataFrame(report_data).set_index("Tool")
     
+    # Reorder rows for clarity
+    tool_order = ["Reference", "eigensnp", "PCAone"]
+    report_df = report_df.reindex([t for t in tool_order if t in report_df.index])
+
     for col in report_df.columns:
         report_df[col] = pd.to_numeric(report_df[col], errors='coerce')
         if "Accuracy" in col or "MSE" in col or "Distance" in col:
