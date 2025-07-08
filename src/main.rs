@@ -306,6 +306,7 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
         min_snp_call_rate_threshold: cli_args.eigensnp_min_call_rate.unwrap_or(0.98),
         min_snp_maf_threshold: cli_args.eigensnp_min_maf.unwrap_or(0.01),
         max_snp_hwe_p_value_threshold: cli_args.eigensnp_max_hwe_p.unwrap_or(1e-4),
+        no_filter: cli_args.no_filter,
     };
 
     let algo_config = EigenSNPCoreAlgorithmConfig {
@@ -589,6 +590,9 @@ mod cli {
 
         #[arg(long, help="Enable detailed diagnostics collection for EigenSNP-Rust (if library feature 'eigensnp-diagnostics' is active).")]
         pub(crate) eigensnp_collect_diagnostics: bool, // Defaults to false
+
+        #[arg(long = "no-filter", help = "Disable all optional SNP QC (MAF, HWE, Call Rate) for the EigenSNP workflow. Assumes data is pre-filtered and ready for PCA.")]
+        pub(crate) no_filter: bool,
     }
 }
 
