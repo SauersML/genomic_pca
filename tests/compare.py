@@ -340,11 +340,14 @@ def run_pcaone():
     
     cmd = [
         str(PCAONE_EXECUTABLE),
-        "-b", str(QC_DATA_PREFIX), # Use the same QC'd data
-        "-k", str(K_COMPONENTS),
+        "-b", str(QC_DATA_PREFIX),   # QC-filtered PLINK prefix
+        "-k", str(K_COMPONENTS),     # number of PCs
+        "-d", "2",                   # winSVD algorithm
+        "-p", "80",                  # ↑ power iterations → ↑ accuracy
         "-o", str(output_prefix),
-        "-n", str(CPU_COUNT),
+        "-n", str(CPU_COUNT),        # threads
     ]
+
     
     start_time = time.time()
     success = run_command(cmd, CWD, "PCAone Execution")
