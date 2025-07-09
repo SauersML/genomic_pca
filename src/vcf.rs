@@ -3,21 +3,17 @@
 // --- External Crate Imports ---
 use anyhow::{anyhow, Result};
 use log::{debug, warn};
-use ndarray::{Array2};
-use noodles_vcf::{Record as VcfRecord, Header as VcfHeader};
-use std::{
-    path::Path,
-    sync::Arc,
-};
-
+use ndarray::Array2;
+use noodles_vcf::{Header as VcfHeader, Record as VcfRecord};
+use std::{path::Path, sync::Arc};
 
 pub mod vcf_processing {
-    use super::{anyhow, debug, warn, Result, Path, Arc, VcfHeader, VcfRecord};
-        
+    use super::{anyhow, debug, warn, Arc, Path, Result, VcfHeader, VcfRecord};
+
     use noodles_vcf::variant::record::samples::series::Value as GenotypeValue;
-     // Explicitly import for `samples::` paths if needed
-    use noodles_vcf::variant::record::AlternateBases as _; // Use _ to import trait methods
-    use noodles_vcf::variant::record::samples::Series as SeriesTrait; // For explicit trait method calls
+    // Explicitly import for `samples::` paths if needed
+    use noodles_vcf::variant::record::samples::Series as SeriesTrait;
+    use noodles_vcf::variant::record::AlternateBases as _; // Use _ to import trait methods // For explicit trait method calls
 
     #[derive(Debug)]
     pub struct SamplesHeaderInfo {
@@ -51,13 +47,23 @@ pub mod vcf_processing {
     #[inline(always)]
     fn parse_gt_to_option_u8(gt_string: &str) -> Option<u8> {
         let bytes = gt_string.as_bytes();
-        if bytes.len() != 3 { return None; }
-        if bytes[1] != b'/' && bytes[1] != b'|' { return None; }
+        if bytes.len() != 3 {
+            return None;
+        }
+        if bytes[1] != b'/' && bytes[1] != b'|' {
+            return None;
+        }
         let allele1 = match bytes[0] {
-            b'0' => 0u8, b'1' => 1u8, b'.' => return None, _ => return None,
+            b'0' => 0u8,
+            b'1' => 1u8,
+            b'.' => return None,
+            _ => return None,
         };
         let allele2 = match bytes[2] {
-            b'0' => 0u8, b'1' => 1u8, b'.' => return None, _ => return None,
+            b'0' => 0u8,
+            b'1' => 1u8,
+            b'.' => return None,
+            _ => return None,
         };
         Some(allele1 + allele2)
     }
@@ -87,13 +93,14 @@ pub mod vcf_processing {
                 first_vcf_path_for_error_msg.display()
             ));
         }
-        
+
         let gt_key_str = "GT"; // Changed to GenotypeKey
 
         if !current_header.formats().contains_key(gt_key_str) {
             return Err(anyhow!(
                 "GT key (FORMAT={}) not found in FORMAT header for VCF {}",
-                gt_key_str, vcf_path.display()
+                gt_key_str,
+                vcf_path.display()
             ));
         }
 
@@ -106,9 +113,8 @@ pub mod vcf_processing {
             let ref_bases_str = record.reference_bases();
             let alt_bases_obj = record.alternate_bases();
 
-            if ref_bases_str.len() != 1
-                || alt_bases_obj.len() != 1
-            // Removed: || alt_bases_obj.as_ref().len() != 1 
+            if ref_bases_str.len() != 1 || alt_bases_obj.len() != 1
+            // Removed: || alt_bases_obj.as_ref().len() != 1
             {
                 debug!(
                     "Variant at {}:{} (REF:{}, ALT:{}) is not a bi-allelic SNP (single base REF, single base ALT), skipping.",
@@ -122,13 +128,19 @@ pub mod vcf_processing {
 
             let mut temp_genotypes_for_variant: Vec<u8> =
                 Vec::with_capacity(canonical_samples_info.sample_count);
-            let mut current_variant_has_gt_issues = false; 
-            
+            let mut current_variant_has_gt_issues = false;
+
             let samples_obj = record.samples();
 
             match samples_obj.select(gt_key_str) {
                 Some(gt_series_struct) => {
-                    for (sample_idx, value_option_result) in <noodles_vcf::record::samples::Series as SeriesTrait>::iter(&gt_series_struct, &current_header).enumerate() {
+                    for (sample_idx, value_option_result) in
+                        <noodles_vcf::record::samples::Series as SeriesTrait>::iter(
+                            &gt_series_struct,
+                            &current_header,
+                        )
+                        .enumerate()
+                    {
                         if sample_idx >= canonical_samples_info.sample_count {
                             warn!("More GT values in series than expected samples for variant at {}:{}. VCF: {}. Truncating.",
                                 record.reference_sequence_name(),
@@ -138,7 +150,8 @@ pub mod vcf_processing {
                             break;
                         }
                         match value_option_result {
-                            Ok(Some(GenotypeValue::String(gt_string_cow_val))) => { // Changed to GenotypeValue
+                            Ok(Some(GenotypeValue::String(gt_string_cow_val))) => {
+                                // Changed to GenotypeValue
                                 let gt_str_slice = gt_string_cow_val.as_ref();
                                 if let Some(gt_val) = parse_gt_to_option_u8(gt_str_slice) {
                                     temp_genotypes_for_variant.push(gt_val);
@@ -150,43 +163,54 @@ pub mod vcf_processing {
                                     break;
                                 }
                             }
-                            Ok(Some(GenotypeValue::Genotype(boxed_gt))) => { // Changed to GenotypeValue
+                            Ok(Some(GenotypeValue::Genotype(boxed_gt))) => {
+                                // Changed to GenotypeValue
                                 let genotype_data = &*boxed_gt;
                                 let mut allele_dosage_sum: u8 = 0;
                                 let mut alleles_processed_count = 0;
                                 let mut current_sample_gt_failed = false;
 
                                 for allele_info_result in genotype_data.iter() {
-                                    if alleles_processed_count >= 2 { break; }
+                                    if alleles_processed_count >= 2 {
+                                        break;
+                                    }
                                     match allele_info_result {
-                                        Ok((Some(allele_idx), _)) => { // Phasing info ignored with _
-                                            if allele_idx == 0 { /* Ref allele */ }
-                                            else if allele_idx == 1 { allele_dosage_sum += 1; /* Alt allele */ }
-                                            else { 
+                                        Ok((Some(allele_idx), _)) => {
+                                            // Phasing info ignored with _
+                                            if allele_idx == 0 { /* Ref allele */
+                                            } else if allele_idx == 1 {
+                                                allele_dosage_sum += 1; /* Alt allele */
+                                            } else {
                                                 debug!("Variant at {}:{}: Sample #{} GT has unexpected allele index {} (>1) for bi-allelic site. Invalidating.",
                                                     record.reference_sequence_name(), record.variant_start().map_or(0u64, |r_p| r_p.map_or(0u64, |p|p.get() as u64)),
                                                     sample_idx, allele_idx);
-                                                current_sample_gt_failed = true; break;
+                                                current_sample_gt_failed = true;
+                                                break;
                                             }
                                         }
-                                        Ok((None, _)) => { /* Missing allele '.' */ // Phasing info ignored
+                                        Ok((None, _)) => {
+                                            /* Missing allele '.' */
+ // Phasing info ignored
                                             debug!("Variant at {}:{}: Sample #{} GT contains missing allele ('.'). Invalidating.",
                                                 record.reference_sequence_name(), record.variant_start().map_or(0u64, |r_p| r_p.map_or(0u64, |p|p.get() as u64)),
                                                 sample_idx);
-                                            current_sample_gt_failed = true; break;
+                                            current_sample_gt_failed = true;
+                                            break;
                                         }
                                         Err(e) => {
                                             warn!("Variant at {}:{}: Error iterating GT alleles for sample #{}: {}. Invalidating.",
                                                 record.reference_sequence_name(), record.variant_start().map_or(0u64, |r_p| r_p.map_or(0u64, |p|p.get() as u64)),
                                                 sample_idx, e);
-                                            current_sample_gt_failed = true; break;
+                                            current_sample_gt_failed = true;
+                                            break;
                                         }
                                     }
                                     alleles_processed_count += 1;
                                 }
 
                                 if current_sample_gt_failed || alleles_processed_count != 2 {
-                                    current_variant_has_gt_issues = true; break;
+                                    current_variant_has_gt_issues = true;
+                                    break;
                                 } else {
                                     temp_genotypes_for_variant.push(allele_dosage_sum);
                                 }
@@ -198,14 +222,14 @@ pub mod vcf_processing {
                                 current_variant_has_gt_issues = true;
                                 break;
                             }
-                            Ok(None) => { 
+                            Ok(None) => {
                                 debug!("Variant at {}:{}: GT field for sample {} is missing (None value). Skipping variant.",
                                     record.reference_sequence_name(), record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
                                     sample_idx);
                                 current_variant_has_gt_issues = true;
                                 break;
                             }
-                            Err(e) => { 
+                            Err(e) => {
                                 warn!("Error parsing a genotype value for variant at {}:{} in VCF {}: {}. Skipping variant.",
                                     record.reference_sequence_name(), record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
                                     vcf_path.display(), e);
@@ -215,11 +239,15 @@ pub mod vcf_processing {
                         }
                     }
                 }
-                None => { 
-                    debug!("Variant at {}:{}: GT series not found in VCF {}. Skipping variant.",
+                None => {
+                    debug!(
+                        "Variant at {}:{}: GT series not found in VCF {}. Skipping variant.",
                         record.reference_sequence_name(),
-                        record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
-                        vcf_path.display());
+                        record
+                            .variant_start()
+                            .map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                        vcf_path.display()
+                    );
                     current_variant_has_gt_issues = true;
                 }
             }
@@ -244,7 +272,7 @@ pub mod vcf_processing {
             let allele_sum: u32 = temp_genotypes_for_variant.iter().map(|&g| g as u32).sum();
             let num_alleles_total: u32 = (canonical_samples_info.sample_count * 2) as u32;
 
-            if num_alleles_total == 0 { 
+            if num_alleles_total == 0 {
                 debug!("Variant at {}:{}: No alleles to calculate MAF (num_alleles_total is 0). Skipping.",
                     record.reference_sequence_name(),
                     record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)));
@@ -257,20 +285,29 @@ pub mod vcf_processing {
             let actual_maf_threshold = cli_args.maf.unwrap_or(0.01); // Default to 0.01 if None
 
             if maf < actual_maf_threshold {
-                debug!("Variant at {}:{}:{} (MAF={:.4}) below threshold ({:.4}). Skipping.",
+                debug!(
+                    "Variant at {}:{}:{} (MAF={:.4}) below threshold ({:.4}). Skipping.",
                     record.reference_sequence_name(),
-                    record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
+                    record
+                        .variant_start()
+                        .map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64)),
                     record.reference_bases(),
-                    maf, actual_maf_threshold); // Use actual_maf_threshold for comparison and Display
+                    maf,
+                    actual_maf_threshold
+                ); // Use actual_maf_threshold for comparison and Display
                 continue;
             }
-            
+
             let alt_allele_str = alt_bases_obj.as_ref().to_string();
             let chrom_str = record.reference_sequence_name().to_string();
-            let pos_val = record.variant_start().map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
-            
-            let variant_id =
-                format!("{}:{}:{}:{}", chrom_str, pos_val, ref_bases_str, alt_allele_str);
+            let pos_val = record
+                .variant_start()
+                .map_or(0u64, |res_p| res_p.map_or(0u64, |p| p.get() as u64));
+
+            let variant_id = format!(
+                "{}:{}:{}:{}",
+                chrom_str, pos_val, ref_bases_str, alt_allele_str
+            );
 
             chromosome_variants_data.push(VariantGenotypeData {
                 id: variant_id,
@@ -287,12 +324,13 @@ pub mod vcf_processing {
 }
 
 pub mod matrix_ops {
-    use super::{anyhow, Result, Array2};
     use super::vcf_processing::VariantGenotypeData;
+    use super::{anyhow, Array2, Result};
 
     pub fn aggregate_chromosome_data(
         per_chromosome_data: Vec<Vec<VariantGenotypeData>>,
-    ) -> (Vec<String>, Vec<Vec<u8>>) { // Changed return type
+    ) -> (Vec<String>, Vec<Vec<u8>>) {
+        // Changed return type
         let mut all_variant_ids = Vec::new();
         // Removed: let mut all_chromosomes = Vec::new();
         // Removed: let mut all_positions = Vec::new();
@@ -327,13 +365,13 @@ pub mod matrix_ops {
         }
 
         let mut final_matrix = Array2::<f64>::zeros((num_samples, num_variants));
-        for (variant_idx, genotypes_for_one_variant) in
-            variant_genotypes_major.iter().enumerate()
-        {
+        for (variant_idx, genotypes_for_one_variant) in variant_genotypes_major.iter().enumerate() {
             if genotypes_for_one_variant.len() != num_samples {
                 return Err(anyhow!(
                     "Genotype count mismatch for variant index {}: expected {}, found {}.",
-                    variant_idx, num_samples, genotypes_for_one_variant.len()
+                    variant_idx,
+                    num_samples,
+                    genotypes_for_one_variant.len()
                 ));
             }
             for sample_idx in 0..num_samples {
