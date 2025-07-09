@@ -31,7 +31,7 @@ PCAONE_EXECUTABLE = PCAONE_SOURCE_DIR / "PCAone"
 PCAONE_GIT_URL = "https://github.com/Zilong-Li/PCAone.git"
 
 # Input Data
-RAW_DATA_PREFIX = CWD.parent / "data" / "chr22_subset50"
+RAW_DATA_PREFIX = CWD.parent / "data" / "chr22_hg38_plink1"
 # This will be the new, fully filtered dataset used by all tools
 QC_DATA_PREFIX = CWD / "comparison_outputs" / "chr22_subset50.qc"
 SAMPLE_INFO_FILE = CWD / "igsr_samples.tsv"
