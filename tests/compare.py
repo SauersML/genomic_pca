@@ -233,8 +233,7 @@ def setup_eigensnp():
         print(f"ERROR: Cargo.toml not found in {EIGENSNP_PROJECT_DIR}. Cannot build.", file=sys.stderr)
         return False
 
-    if not run_command(["cargo", "build", "--release"], EIGENSNP_PROJECT_DIR, "Build eigensnp (cargo build --release)"):
-    if not run_command(["cargo", "build", "--release", "--features", "mkl-faer"], EIGENSNP_PROJECT_DIR, "Build eigensnp."):
+    if not run_command(["cargo", "build", "--release", "--features", "openblas-faer"], EIGENSNP_PROJECT_DIR, "Build eigensnp."):
         return False
 
     if not EIGENSNP_EXECUTABLE.exists():
