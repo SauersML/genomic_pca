@@ -153,6 +153,7 @@ pub struct MicroarrayDataPreparerConfig {
     pub min_snp_call_rate_threshold: f64,
     pub min_snp_maf_threshold: f64,
     pub max_snp_hwe_p_value_threshold: f64,
+    pub no_filter: bool,
 }
 
 pub struct MicroarrayDataPreparer {
@@ -1012,12 +1013,18 @@ impl MicroarrayDataPreparer {
 
         let original_indices_of_qc_samples_arc = Arc::new(original_indices_of_qc_samples_vec);
 
-        let (final_qc_snps_details, _num_final_qc_snps) = self.perform_snp_qc_and_calc_std_params(
+        // Logging is now handled within process_snps_and_qc based on apply_optional_qc.
+        // No specific log message needed here about skipping/applying QC,
+        // as process_snps_and_qc will log its mode of operation.
+
+        let (final_qc_snps_details, _num_final_qc_snps) = self.process_snps_and_qc(
             &original_indices_of_qc_samples_arc,
             num_qc_samples,
+            !self.config.no_filter, // If 'no_filter' is true, 'apply_optional_qc' becomes false.
         )?;
         if final_qc_snps_details.is_empty() {
-            return Err(Box::new(DataPrepError::Message("No SNPs passed all QC filters.".to_string())) as ThreadSafeStdError);
+            // This message is generic enough for both cases (with or without QC)
+            return Err(Box::new(DataPrepError::Message("No SNPs available for PCA after SNP processing step.".to_string())) as ThreadSafeStdError);
         }
 
         let (
@@ -1095,16 +1102,21 @@ impl MicroarrayDataPreparer {
         Ok((qc_sample_original_indices, num_qc_samples))
     }
 
-    /// Performs SNP quality control (call rate, MAF, HWE) and calculates standardization parameters (mean, std dev)
+    /// Performs SNP quality control (call rate, MAF, HWE) if requested, and calculates standardization parameters (mean, std dev)
     /// using the IoService for batched BED file reading.
-    fn perform_snp_qc_and_calc_std_params(
+    fn process_snps_and_qc( // Renamed function
         &self,
         original_indices_of_qc_samples_arc: &Arc<Vec<isize>>,
         num_qc_samples: usize,
+        apply_optional_qc: bool, // New parameter
     ) -> Result<(Vec<IntermediateSnpDetails>, usize), ThreadSafeStdError> {
-        info!("Starting SNP QC & Standardization Params calculation for {} QC'd samples using IoService.", num_qc_samples);
+        if apply_optional_qc {
+            info!("Starting SNP QC & Standardization Params calculation for {} QC'd samples using IoService.", num_qc_samples);
+        } else {
+            info!("Starting SNP Standardization Params calculation (Optional QC SKIPPED) for {} QC'd samples using IoService.", num_qc_samples);
+        }
 
-        // Strict 100% Call Rate Policy is enforced.
+        // Strict 100% Call Rate Policy is enforced if apply_optional_qc is true.
         if num_qc_samples == 0 {
             debug!("No QC samples provided; skipping SNP QC and returning empty results.");
             return Ok((Vec::new(), 0));
@@ -1231,6 +1243,7 @@ impl MicroarrayDataPreparer {
                                         
                                         // --- Pass 1: Count valid genotypes, sum dosages, count observed genotypes ---
                                         let mut i: usize = 0;
+                                        // SIMD block for Pass 1
                                         while i + ACTUAL_LANES_I8 <= num_samples_total {
                                             let i8_chunk = Simd::<i8, ACTUAL_LANES_I8>::from_slice(&snp_data_slice[i..i + ACTUAL_LANES_I8]);
                                             let valid_mask_i8 = i8_chunk.simd_ne(missing_i8_simd); // Mask<i8, 32>
@@ -1278,44 +1291,55 @@ impl MicroarrayDataPreparer {
                                             }
                                         }
                                         
-                                        // --- QC Checks (using scalar accumulators) ---
-                                        if num_qc_samples > 0 { // num_qc_samples is the total number of samples after QC
-                                            let call_rate = num_valid_genotypes_for_snp_scalar as f64 / num_qc_samples as f64;
-                                            if call_rate < self.config.min_snp_call_rate_threshold { return None; }
-                                        } else if num_valid_genotypes_for_snp_scalar == 0 { // If num_qc_samples is 0, this implies no samples, so valid genotypes must be 0
-                                            return None;
-                                        } else { // num_qc_samples is 0, but valid genotypes > 0. This is an inconsistent state.
-                                            warn!("SNP QC (idx {}): num_qc_samples is 0, but found {} valid genotypes. Inconsistent state. Skipping.", original_m_idx, num_valid_genotypes_for_snp_scalar);
-                                            return None;
-                                        }
+                                        // ESSENTIAL CHECK - This ALWAYS runs, regardless of the flag.
+                                        // If there are no valid genotypes, none of the QC checks or stat calculations can proceed.
+                                        if num_valid_genotypes_for_snp_scalar == 0 { return None; }
 
-                                        if num_valid_genotypes_for_snp_scalar == 0 { return None; } // No valid data to compute stats
-
+                                        // Calculate mean_allele1_dosage_f64 once, as it's needed for MAF (if QC is applied)
+                                        // and always for variance calculation.
                                         let mean_allele1_dosage_f64 = allele1_dosage_sum_f64_scalar / num_valid_genotypes_for_snp_scalar as f64;
-                                        let allele1_freq = mean_allele1_dosage_f64 / 2.0; // Dosages are 0, 1, 2
-                                        let maf = allele1_freq.min(1.0 - allele1_freq);
 
-                                        // MAF check (includes monomorphic check indirectly if maf_threshold > 0)
-                                        if maf < self.config.min_snp_maf_threshold { return None; }
-                                        // Explicit check for monomorphic SNPs if maf_threshold is 0, or to catch floating point edge cases.
-                                        // A SNP is monomorphic if p or q is effectively 0.
-                                        if allele1_freq.abs() < 1e-9 || (1.0 - allele1_freq).abs() < 1e-9 {
-                                            return None; // Monomorphic
-                                        }
+                                        // --- Optional QC Checks (using scalar accumulators) ---
+                                        if apply_optional_qc {
+                                            // This block contains all the OPTIONAL QC checks.
+                                            // It only runs if --no-filter is OFF (i.e., apply_optional_qc is true).
+                                            // info! log message for this is at the start of the function.
+
+                                            // 1. Call Rate Check
+                                            if num_qc_samples > 0 {
+                                                let call_rate = num_valid_genotypes_for_snp_scalar as f64 / num_qc_samples as f64;
+                                                if call_rate < self.config.min_snp_call_rate_threshold { return None; }
+                                            } else {
+                                                // This case (num_qc_samples == 0 but num_valid_genotypes_for_snp_scalar > 0)
+                                                // implies an issue if QC is expected. Call rate is undefined.
+                                                warn!("SNP QC (idx {}): apply_optional_qc is true, num_qc_samples is 0, but found {} valid genotypes. Call rate undefined. Skipping.", original_m_idx, num_valid_genotypes_for_snp_scalar);
+                                                return None;
+                                            }
                                         
-                                        if self.config.max_snp_hwe_p_value_threshold < 1.0 { // Only calculate HWE if threshold is not 1.0 (i.e., filter is active)
-                                            let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(
-                                                obs_hom_ref_count_scalar as usize, obs_het_count_scalar as usize, obs_hom_alt_count_scalar as usize
-                                            );
-                                            if hwe_p_val <= self.config.max_snp_hwe_p_value_threshold { return None; }
+                                            // 2. MAF Check
+                                            let allele1_freq = mean_allele1_dosage_f64 / 2.0; // Dosages are 0, 1, 2
+                                            let maf = allele1_freq.min(1.0 - allele1_freq);
+                                            if maf < self.config.min_snp_maf_threshold { return None; }
+
+                                            // The check for monomorphic SNPs via allele1_freq has been removed here,
+                                            // as it's covered by the variance_f64 <= 1e-9 check later, which always runs.
+
+                                            // 3. HWE Check
+                                            if self.config.max_snp_hwe_p_value_threshold < 1.0 { // Only calculate HWE if threshold is not 1.0 (i.e., filter is active)
+                                                let hwe_p_val = MicroarrayDataPreparer::calculate_hwe_chi_squared_p_value(
+                                                    obs_hom_ref_count_scalar as usize, obs_het_count_scalar as usize, obs_hom_alt_count_scalar as usize
+                                                );
+                                                if hwe_p_val <= self.config.max_snp_hwe_p_value_threshold { return None; }
+                                            }
                                         }
                                         
                                         let mean_f32_for_storage = mean_allele1_dosage_f64 as f32;
 
-                                        // --- Pass 2: Calculate Sum of Squared Differences (SoS) for variance ---
+                                        // --- Pass 2: Calculate Sum of Squared Differences (SoS) for variance (ALWAYS RUNS) ---
                                         let mut sum_sq_diff_f64_scalar_pass2: f64 = 0.0;
 
                                         i = 0; // Reset i for Pass 2
+                                        // SIMD block for Pass 2
                                         while i + ACTUAL_LANES_I8 <= num_samples_total {
                                             let i8_chunk = Simd::<i8, ACTUAL_LANES_I8>::from_slice(&snp_data_slice[i..i + ACTUAL_LANES_I8]);
                                             let valid_mask_i8 = i8_chunk.simd_ne(missing_i8_simd); // Mask<i8, ACTUAL_LANES_I8>
