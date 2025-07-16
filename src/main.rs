@@ -481,13 +481,36 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
     }
     info!("Initializing EigenSNPCoreAlgorithm (from efficient_pca crate)...");
     let algorithm = EigenSNPCoreAlgorithm::new(algo_config);
+
+    // Retrieve PCA SNP metadata before compute_pca so we can pass it to the function
+    info!("Retrieving SNP metadata for PCA computation...");
+    let (pca_snp_ids, pca_snp_chroms, pca_snp_pos) = get_eigensnp_ordered_pca_snp_metadata(
+        &preparer,
+        genotype_accessor.original_indices_of_pca_snps().as_slice(),
+    )?;
+    
+    // Build the metadata structure needed for compute_pca
+    let pca_snp_master_metadata: Vec<efficient_pca::eigensnp::PcaSnpMetadata> =
+        pca_snp_ids.iter()
+            .zip(pca_snp_chroms.iter())
+            .zip(pca_snp_pos.iter())
+            .map(|((id, chr), &pos)| {
+                efficient_pca::eigensnp::PcaSnpMetadata {
+                    id: Arc::new(id.clone()),
+                    chr: Arc::new(chr.clone()),
+                    pos,
+                }
+            })
+            .collect();
+    info!("Master SNP metadata list created with {} entries.", pca_snp_master_metadata.len());
+
     info!("Computing EigenSNP-Rust PCA...");
     let eigensnp_algo_start = Instant::now();
     let (pca_output, diagnostics_option) = algorithm
         .compute_pca(
             &genotype_accessor,
             &ld_block_specifications,
-            &[], // Using empty array as a placeholder
+            &pca_snp_master_metadata, // Pass the prepared metadata instead of empty slice
         )
         .map_err(|e| {
             anyhow!(
@@ -536,30 +559,8 @@ fn run_eigensnp_rust_workflow(cli_args: &CliArgs) -> Result<(), Error> {
         &cli_args.output_prefix,
         &pca_output.final_principal_component_eigenvalues.to_vec(),
     )?;
-    let (pca_snp_ids, pca_snp_chroms, pca_snp_pos) = get_eigensnp_ordered_pca_snp_metadata(
-        &preparer,
-        genotype_accessor.original_indices_of_pca_snps().as_slice(),
-    )?;
-    let pca_snp_master_metadata: Vec<efficient_pca::eigensnp::PcaSnpMetadata> =
-        pca_snp_ids.into_iter()
-            .zip(pca_snp_chroms.into_iter())
-            .zip(pca_snp_pos.into_iter())
-            .map(|((id, chr), pos)| {
-                efficient_pca::eigensnp::PcaSnpMetadata {
-                    id: Arc::new(id),
-                    chr: Arc::new(chr),
-                    pos,
-                }
-            })
-            .collect();
-    info!("Master SNP metadata list created with {} entries.", pca_snp_master_metadata.len());
-    let (mut pca_snp_ids, mut pca_snp_chroms, mut pca_snp_pos) = (Vec::new(), Vec::new(), Vec::new());
     
-    for meta in pca_snp_master_metadata.iter() {
-        pca_snp_ids.push((*meta.id).clone());
-        pca_snp_chroms.push((*meta.chr).clone());
-        pca_snp_pos.push(meta.pos);
-    }
+    // We can directly use the original vectors that we kept in scope
     output_writer::write_loadings_f32(
         &cli_args.output_prefix,
         &pca_snp_ids,
