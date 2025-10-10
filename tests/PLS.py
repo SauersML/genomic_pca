@@ -132,40 +132,63 @@ def pop_color_map(series: pd.Series):
     return {p: cmap(i % 20) for i, p in enumerate(uniq)}
 
 def make_plots(pcs_df: pd.DataFrame, umap_df: pd.DataFrame, out_png: Path):
-    fig, axes = plt.subplots(2, 2, figsize=(13, 11))
-    ax_pc_super, ax_pc_pop, ax_umap_super, ax_umap_pop = axes.flatten()
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
-    # PC1–PC2 by Superpopulation
-    for spop, g in pcs_df.groupby("Superpopulation"):
-        c = SUPERPOP_COLORS.get(spop, "#7f7f7f")
-        ax_pc_super.scatter(g["PC1"], g["PC2"], s=18, alpha=0.75, c=[c], label=spop, rasterized=True)
-    ax_pc_super.set(title="PC1 vs PC2 — Superpopulation", xlabel="PC1", ylabel="PC2")
-    ax_pc_super.legend(frameon=False, fontsize=8, markerscale=1.2)
+    # Build a population colormap across both datasets, and use fixed superpop colors
+    all_pops = pd.concat([pcs_df["Population"], umap_df["Population"]], ignore_index=True)
+    pop_colors = _pop_cmap(all_pops)  # facecolor by Population
+    sp_colors = SUPERPOP_COLORS       # edgecolor by Superpopulation
 
-    # PC1–PC2 by Population
-    pcmap = pop_color_map(pcs_df["Population"])
-    for pop, g in pcs_df.groupby("Population"):
-        ax_pc_pop.scatter(g["PC1"], g["PC2"], s=18, alpha=0.75, c=[pcmap[pop]], label=pop, rasterized=True)
-    ax_pc_pop.set(title="PC1 vs PC2 — Population", xlabel="PC1", ylabel="PC2")
-    ax_pc_pop.legend(frameon=False, fontsize=7, markerscale=1.2)
+    def scatter(ax, x, y, pop_series, sp_series, title, xlabel, ylabel):
+        fc = pop_series.map(pop_colors).tolist()
+        ec = sp_series.map(lambda s: sp_colors.get(s, "#7f7f7f")).tolist()
+        ax.scatter(x, y, s=18, alpha=0.85, c=fc, edgecolors=ec, linewidths=0.6, rasterized=True)
+        ax.set(title=title, xlabel=xlabel, ylabel=ylabel)
 
-    # UMAP by Superpopulation
-    for spop, g in umap_df.groupby("Superpopulation"):
-        c = SUPERPOP_COLORS.get(spop, "#7f7f7f")
-        ax_umap_super.scatter(g["UMAP1"], g["UMAP2"], s=18, alpha=0.8, c=[c], label=spop, rasterized=True)
-    ax_umap_super.set(title="UMAP(PC1..PC15) — Superpopulation", xlabel="UMAP1", ylabel="UMAP2")
-    ax_umap_super.legend(frameon=False, fontsize=8, markerscale=1.2)
+        # Legend for Superpopulations (edgecolor)
+        sp_handles = [
+            Line2D([0], [0], marker='o', linestyle='',
+                   markerfacecolor='white', markeredgecolor=color,
+                   markeredgewidth=1.2, label=sp)
+            for sp, color in sp_colors.items()
+        ]
+        leg_sp = ax.legend(handles=sp_handles, title="Superpopulation (edgecolor)",
+                           frameon=False, fontsize=8, loc="best")
+        ax.add_artist(leg_sp)
 
-    # UMAP by Population
-    ucmap = pop_color_map(umap_df["Population"])
-    for pop, g in umap_df.groupby("Population"):
-        ax_umap_pop.scatter(g["UMAP1"], g["UMAP2"], s=18, alpha=0.8, c=[ucmap[pop]], label=pop, rasterized=True)
-    ax_umap_pop.set(title="UMAP(PC1..PC15) — Population", xlabel="UMAP1", ylabel="UMAP2")
-    ax_umap_pop.legend(frameon=False, fontsize=7, markerscale=1.2)
+        # Legend for Populations (facecolor) — cap to avoid clutter
+        unique_pops = list(pop_colors.keys())
+        max_lab = 20
+        pop_handles = [
+            Line2D([0], [0], marker='o', linestyle='',
+                   markerfacecolor=pop_colors[p], markeredgecolor='k',
+                   label=p)
+            for p in unique_pops[:max_lab]
+        ]
+        ax.legend(handles=pop_handles,
+                  title=("Population (facecolor)" if len(unique_pops) <= max_lab else
+                         f"Population (facecolor; first {max_lab})"),
+                  frameon=False, fontsize=7, loc="lower left")
 
-    fig.suptitle("Dimensionality Reduction — chr22_subset50 (whitelist SNPs only)", fontsize=16, y=0.98)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    # Two panels: PCA (PC1 vs PC2) and UMAP
+    fig, (ax_pca, ax_umap) = plt.subplots(1, 2, figsize=(14, 6))
+
+    scatter(ax_pca,
+            pcs_df["PC1"], pcs_df["PC2"],
+            pcs_df["Population"], pcs_df["Superpopulation"],
+            "PC1 vs PC2 (facecolor=Population, edgecolor=Superpopulation)",
+            "PC1", "PC2")
+
+    scatter(ax_umap,
+            umap_df["UMAP1"], umap_df["UMAP2"],
+            umap_df["Population"], umap_df["Superpopulation"],
+            "UMAP (PC1..PC15) (facecolor=Population, edgecolor=Superpopulation)",
+            "UMAP1", "UMAP2")
+
+    fig.tight_layout()
     fig.savefig(out_png, dpi=300)
+    print(f"[plot] saved {out_png}")
 
 # ------------------ Main ------------------
 def main():
