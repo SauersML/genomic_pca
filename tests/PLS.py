@@ -440,8 +440,7 @@ def main():
     #     download(URLS[key], dest)
     #     unzip(dest, DATA_DIR)
 
-    # The analysis expects PLINK files with prefix "hg38_plink1" in the CWD.
-    prefix = Path("hg38_chr22")
+    prefix = "/home/user/agents/data/fast_pca_out/data/hg38_chr22"
 
     # ---- 3) read metadata
     ST.start()
