@@ -6,11 +6,7 @@ from pathlib import Path
 import numpy as np
 import zstandard as zstd
 
-try:
-    import pgenlib as pg  # PLINK2 reader (Python API)
-except Exception:
-    print("ERROR: Please 'pip install --user Pgenlib zstandard numpy' first.", file=sys.stderr)
-    raise
+import pgenlib as pg  # PLINK2 reader (Python API)
 
 # ---------- helpers ----------
 
