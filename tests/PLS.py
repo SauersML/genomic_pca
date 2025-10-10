@@ -320,7 +320,7 @@ def main():
     download(URLS["igsr_tsv"], igsr_tsv)
     download(URLS["whitelist_tsv"], white_tsv)
 
-    prefix = DATA_DIR / "hg38_plink1"
+    prefix = Path("hg38_plink1")
 
     # ---- read metadata
     fam = read_fam(prefix)
