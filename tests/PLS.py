@@ -135,60 +135,62 @@ def make_plots(pcs_df: pd.DataFrame, umap_df: pd.DataFrame, out_png: Path):
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
-    # Use existing pop_color_map (fixes NameError from _pop_cmap)
+    # Facecolor by Population; edgecolor by Superpopulation
     all_pops = pd.concat([pcs_df["Population"], umap_df["Population"]], ignore_index=True)
-    pop_colors = pop_color_map(all_pops)   # facecolor by Population
-    sp_colors  = SUPERPOP_COLORS           # edgecolor by Superpopulation
+    pop_colors = pop_color_map(all_pops)
+    sp_colors  = SUPERPOP_COLORS
 
-    def scatter(ax, x, y, pop_series, sp_series, title, xlabel, ylabel):
+    def scatter(ax, x, y, pop_series, sp_series, title, xlabel, ylabel, with_legends: bool):
         fc = pop_series.map(pop_colors).tolist()
         ec = sp_series.map(lambda s: sp_colors.get(s, "#7f7f7f")).tolist()
         ax.scatter(x, y, s=18, alpha=0.85, c=fc, edgecolors=ec, linewidths=0.6, rasterized=True)
         ax.set(title=title, xlabel=xlabel, ylabel=ylabel)
 
-        # Legend: Superpopulations (edgecolor)
-        sp_handles = [
-            Line2D([0], [0], marker='o', linestyle='',
-                   markerfacecolor='white', markeredgecolor=color,
-                   markeredgewidth=1.2, label=sp)
-            for sp, color in sp_colors.items()
-        ]
-        leg_sp = ax.legend(handles=sp_handles, title="Superpopulation (edgecolor)",
-                           frameon=False, fontsize=8, loc="best")
-        ax.add_artist(leg_sp)
+        if with_legends:
+            # Superpopulation legend (edgecolor)
+            sp_handles = [
+                Line2D([0], [0], marker='o', linestyle='',
+                       markerfacecolor='white', markeredgecolor=color,
+                       markeredgewidth=1.2, label=sp)
+                for sp, color in sp_colors.items()
+            ]
+            leg_sp = ax.legend(handles=sp_handles, title="Superpopulation (edgecolor)",
+                               frameon=False, fontsize=8, loc="best")
+            ax.add_artist(leg_sp)
 
-        # Legend: Populations (facecolor), capped for readability
-        unique_pops = list(pop_colors.keys())
-        max_lab = 20
-        pop_handles = [
-            Line2D([0], [0], marker='o', linestyle='',
-                   markerfacecolor=pop_colors[p], markeredgecolor='k', label=p)
-            for p in unique_pops[:max_lab]
-        ]
-        ax.legend(handles=pop_handles,
-                  title=("Population (facecolor)" if len(unique_pops) <= max_lab
-                         else f"Population (facecolor; first {max_lab})"),
-                  frameon=False, fontsize=7, loc="lower left")
+            # Population legend (facecolor), capped
+            unique_pops = list(pop_colors.keys())
+            max_lab = 20
+            pop_handles = [
+                Line2D([0], [0], marker='o', linestyle='',
+                       markerfacecolor=pop_colors[p], markeredgecolor='k', label=p)
+                for p in unique_pops[:max_lab]
+            ]
+            ax.legend(handles=pop_handles,
+                      title=("Population (facecolor)" if len(unique_pops) <= max_lab
+                             else f"Population (facecolor; first {max_lab})"),
+                      frameon=False, fontsize=7, loc="lower left")
 
-    # Two panels only: PCA (PC1 vs PC2) and UMAP
+    # Two panels only: left = PCA (no legends), right = UMAP (with legends)
     fig, (ax_pca, ax_umap) = plt.subplots(1, 2, figsize=(14, 6))
 
     scatter(ax_pca,
             pcs_df["PC1"], pcs_df["PC2"],
             pcs_df["Population"], pcs_df["Superpopulation"],
             "PC1 vs PC2 (facecolor=Population, edgecolor=Superpopulation)",
-            "PC1", "PC2")
+            "PC1", "PC2",
+            with_legends=False)
 
     scatter(ax_umap,
             umap_df["UMAP1"], umap_df["UMAP2"],
             umap_df["Population"], umap_df["Superpopulation"],
             "UMAP (PC1..PC15) (facecolor=Population, edgecolor=Superpopulation)",
-            "UMAP1", "UMAP2")
+            "UMAP1", "UMAP2",
+            with_legends=True)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=300)
     print(f"[plot] saved {out_png}")
-
 
 # ------------------ Main ------------------
 def main():
