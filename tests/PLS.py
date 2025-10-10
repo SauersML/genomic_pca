@@ -1,4 +1,5 @@
 import os
+import io
 import sys
 import zipfile
 import urllib.request
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from bed_reader import open_bed
+import pgenlib  # PLINK 2 reader/writer
 from scipy.linalg import eigh
 from umap import UMAP
 import matplotlib.pyplot as plt
@@ -89,29 +91,43 @@ def unzip(zip_path: Path, out_dir: Path):
                 pbar.update(info.file_size)
 
 # ============================================================
-#                          READERS
+#                          READERS (PLINK 2)
 # ============================================================
-def read_fam(prefix: Path) -> pd.DataFrame:
-    fam = pd.read_csv(
-        prefix.with_suffix(".fam"),
-        sep=r"\s+",
-        header=None,
-        names=["FID","IID","PAT","MAT","SEX","PHENO"],
-        dtype=str
-    )
-    fam["IID"] = fam["IID"].astype(str).str.strip()
-    return fam
+def read_psam(prefix: Path) -> pd.DataFrame:
+    """
+    Read PLINK 2 .psam; ensure IID is clean.
+    """
+    psam_path = prefix.with_suffix(".psam")
+    df = pd.read_csv(psam_path, sep=r"\s+", dtype=str)
+    if "#FID" in df.columns:
+        df = df.rename(columns={"#FID": "FID"})
+    df["IID"] = df["IID"].astype(str).str.strip()
+    return df
 
-def read_bim(prefix: Path) -> pd.DataFrame:
-    bim = pd.read_csv(
-        prefix.with_suffix(".bim"),
-        sep=r"\s+",
-        header=None,
-        names=["chrom","sid","cm","pos","a1","a2"]
+def read_pvar(prefix: Path) -> pd.DataFrame:
+    """
+    Read PLINK 2 .pvar; normalize CHROM and POS; keep order (variant index).
+    Handles optional '##' meta-lines.
+    """
+    pvar_path = prefix.with_suffix(".pvar")
+    # Read, dropping any '##' lines manually to keep the true header row (#CHROM ...)
+    with open(pvar_path, "r") as f:
+        lines = [ln for ln in f if not ln.startswith("##")]
+    pvar = pd.read_csv(io.StringIO("".join(lines)), sep=r"\s+", dtype=str)
+    if "#CHROM" in pvar.columns:
+        pvar = pvar.rename(columns={"#CHROM": "CHROM"})
+    # Normalize chromosome labels and POS
+    chrom_str = (
+        pvar["CHROM"].astype(str).str.strip()
+        .str.replace(r"^chr", "", regex=True)
+        .str.upper()
     )
-    bim["chrom_norm"] = pd.to_numeric(bim["chrom"], errors="coerce").astype("Int64")
-    bim["pos"] = pd.to_numeric(bim["pos"], errors="coerce").astype("Int64")
-    return bim
+    chrom_num = pd.to_numeric(chrom_str, errors="coerce")  # non-numeric (X/Y/MT) → NaN
+    pos_num   = pd.to_numeric(pvar["POS"].astype(str).str.strip(), errors="coerce")
+    out = pvar.copy()
+    out["chrom_norm"] = chrom_num.astype("Int64")
+    out["pos"] = pos_num.astype("Int64")
+    return out  # column order preserved; row index == variant index
 
 def read_igsr(igsr_path: Path) -> pd.DataFrame:
     df = pd.read_csv(igsr_path, sep="\t", dtype=str)
@@ -128,9 +144,8 @@ def read_whitelist(tsv_path: Path) -> pd.DataFrame:
         .str.replace(r"^chr", "", regex=True)
         .str.upper()
     )
-    chrom_num = pd.to_numeric(chrom_str, errors="coerce")  # non-numeric (X/Y/MT) → NaN
+    chrom_num = pd.to_numeric(chrom_str, errors="coerce")
     pos_num   = pd.to_numeric(wl_raw["POS"].str.strip(), errors="raise")
-
     wl = pd.DataFrame({
         "chrom_norm": chrom_num.astype("Int64"),
         "pos": pos_num.astype("Int64"),
@@ -141,38 +156,45 @@ def read_whitelist(tsv_path: Path) -> pd.DataFrame:
 # ============================================================
 #                 SNP SELECTION / SHARED KEEP MASK
 # ============================================================
-def compute_keep_mask(prefix: Path, bim: pd.DataFrame, wl: pd.DataFrame) -> np.ndarray:
+def compute_keep_mask(prefix: Path, pvar: pd.DataFrame, wl: pd.DataFrame) -> np.ndarray:
     """
-    Return a boolean mask over all SNPs in the BED indicating those in whitelist∩BIM (here chr22).
+    Return a boolean mask over all variants in the PGEN indicating those in whitelist∩PVAR (here chr22).
     Prints a concise report of overlap cardinality.
     """
-    print("  • Computing whitelist ∩ BIM (restricted to chr22) …", flush=True)
-    bed = open_bed(str(prefix.with_suffix(".bed")), count_A1=False)
-    n_snps = bed.sid_count
+    print("  • Computing whitelist ∩ PVAR (restricted to chr22) …", flush=True)
 
+    n_snps = len(pvar)
     wl_22 = wl[wl["chrom_norm"] == 22]
-    bim_idxed = bim.reset_index().rename(columns={"index":"sidx"})
-    allowed = bim_idxed.merge(wl_22[["chrom_norm","pos"]], on=["chrom_norm","pos"], how="inner")
+    pvar_idxed = pvar.reset_index().rename(columns={"index":"sidx"})
+    allowed = pvar_idxed.merge(wl_22[["chrom_norm","pos"]], on=["chrom_norm","pos"], how="inner")
     keep_indices = allowed["sidx"].to_numpy(dtype=int)
 
     keep_mask = np.zeros(n_snps, dtype=bool)
     keep_mask[keep_indices] = True
 
-    print(f"    └─ BIM SNPs: {len(bim):,} | Whitelist chr22: {len(wl_22):,} | Kept: {keep_mask.sum():,}", flush=True)
+    print(f"    └─ PVAR SNPs: {len(pvar):,} | Whitelist chr22: {len(wl_22):,} | Kept: {keep_mask.sum():,}", flush=True)
     return keep_mask
 
 # ============================================================
 #                PCA: GRM CONSTRUCTION (STREAMED)
 # ============================================================
+def _open_pgen(prefix: Path):
+    """
+    Open .pgen via pgenlib. Some builds require a bytes path; provide it.
+    """
+    pgen_path_bytes = os.fsencode(str(prefix.with_suffix(".pgen")))
+    return pgenlib.PgenReader(pgen_path_bytes)
+
 def build_grm_from_mask(prefix: Path, keep_mask: np.ndarray):
     """
-    Stream the genotype matrix and accumulate the GRM using only kept SNPs.
+    Stream the genotype matrix from .pgen and accumulate the GRM using only kept SNPs.
     Dual progress bars:
       • Variants scanned (all SNPs)
       • Kept SNPs accumulated (effective work)
     """
-    bed = open_bed(str(prefix.with_suffix(".bed")), count_A1=False)
-    n_samples, n_snps = bed.iid_count, bed.sid_count
+    pgen = _open_pgen(prefix)
+    n_samples = pgen.get_raw_sample_ct()
+    n_snps = pgen.get_variant_ct()
 
     gram = np.zeros((n_samples, n_samples), dtype=np.float64)
     kept_total = 0
@@ -183,18 +205,21 @@ def build_grm_from_mask(prefix: Path, keep_mask: np.ndarray):
     accumulated = tqdm(total=total_kept_target, desc="Accumulating kept SNPs", unit="SNP",
                        leave=False, dynamic_ncols=True)
 
+    # read in variant-strided chunks, then subselect kept sites in the chunk
     for start in range(0, n_snps, CHUNK_SNPS):
         end = min(start + CHUNK_SNPS, n_snps)
         submask = keep_mask[start:end]
-
-        # update "scanned" bar regardless (we swept these SNPs)
         scanned.update(end - start)
-
         if not submask.any():
             continue
 
-        X = bed.read(index=np.s_[:, start:end], dtype="float32", order="C")  # (n_samples, width)
-        X = X[:, submask]
+        width = end - start
+        # sample-major buffer → shape (n_samples, width)
+        buf = np.empty((n_samples, width), dtype=np.int8, order="C")
+        pgen.read_range(start, end, buf, allele_idx=1, sample_maj=1)  # alt-allele hardcalls; missing = -9
+
+        X = buf.astype(np.float32, copy=False)[:, submask]
+        X[X < 0] = np.nan  # convert pgenlib's -9 to NaN
         means = np.nanmean(X, axis=0)
         X -= means
         np.nan_to_num(X, copy=False)  # NaNs→0 post-centering
@@ -204,6 +229,7 @@ def build_grm_from_mask(prefix: Path, keep_mask: np.ndarray):
 
     scanned.close()
     accumulated.close()
+    pgen.close()
 
     gram /= max(kept_total, 1)
     return gram, kept_total
@@ -226,8 +252,9 @@ def build_X_from_mask(prefix: Path, keep_mask: np.ndarray):
     Materialize the centered genotype matrix X over kept SNPs.
     Telemetry mirrors GRM construction (scanned vs kept SNPs).
     """
-    bed = open_bed(str(prefix.with_suffix(".bed")), count_A1=False)
-    n_samples, n_snps = bed.iid_count, bed.sid_count
+    pgen = _open_pgen(prefix)
+    n_samples = pgen.get_raw_sample_ct()
+    n_snps = pgen.get_variant_ct()
 
     cols = []
     kept_total = 0
@@ -243,12 +270,15 @@ def build_X_from_mask(prefix: Path, keep_mask: np.ndarray):
         submask = keep_mask[start:end]
 
         scanned.update(end - start)
-
         if not submask.any():
             continue
 
-        X = bed.read(index=np.s_[:, start:end], dtype="float32", order="C")  # (n_samples, width)
-        X = X[:, submask]
+        width = end - start
+        buf = np.empty((n_samples, width), dtype=np.int8, order="C")
+        pgen.read_range(start, end, buf, allele_idx=1, sample_maj=1)
+
+        X = buf.astype(np.float32, copy=False)[:, submask]
+        X[X < 0] = np.nan
         means = np.nanmean(X, axis=0)
         X -= means
         np.nan_to_num(X, copy=False)
@@ -258,9 +288,10 @@ def build_X_from_mask(prefix: Path, keep_mask: np.ndarray):
 
     scanned.close()
     accumulated.close()
+    pgen.close()
 
     if len(cols) == 0:
-        return np.zeros((bed.iid_count, 0), dtype="float32"), 0
+        return np.zeros((n_samples, 0), dtype="float32"), 0
 
     X_all = np.concatenate(cols, axis=1).astype("float32", copy=False)
     return X_all, kept_total
@@ -399,8 +430,8 @@ def main():
     stage_names = [
         "Initialize output/data directories",
         "Download inputs (TSV metadata/whitelist)",
-        "Read metadata (FAM/BIM/IGSR/whitelist)",
-        "Compute SNP keep mask (whitelist ∩ BIM@chr22)",
+        "Read metadata (PSAM/PVAR/IGSR/whitelist)",
+        "Compute SNP keep mask (whitelist ∩ PVAR@chr22)",
         "PCA pipeline: build GRM (streamed) and decompose",
         "Write PCA outputs",
         "PLS-DA pipeline: build X (streamed) and fit",
@@ -428,14 +459,15 @@ def main():
     ST.note(f"Fetching array whitelist (hg38) → {white_tsv.name}")
     download(URLS["whitelist_tsv"], white_tsv)
 
-    prefix = "/home/user/agents/data/fast_pca_out/data/hg38_chr22"
+    # The script expects hg38_chr22.{pgen,pvar,psam} in the current directory.
+    prefix = Path("hg38_chr22").resolve()
 
     # ---- 3) read metadata
     ST.start()
-    ST.note("Reading FAM …")
-    fam = read_fam(prefix)
-    ST.note("Reading BIM …")
-    bim = read_bim(prefix)
+    ST.note("Reading PSAM …")
+    fam = read_psam(prefix)
+    ST.note("Reading PVAR …")
+    pvar = read_pvar(prefix)
     ST.note("Reading IGSR metadata …")
     igsr = read_igsr(igsr_tsv)
     ST.note("Reading whitelist …")
@@ -443,7 +475,7 @@ def main():
 
     # ---- 4) shared SNP mask
     ST.start()
-    keep_mask = compute_keep_mask(prefix, bim, wl)
+    keep_mask = compute_keep_mask(prefix, pvar, wl)
 
     # ---- 5) PCA: GRM + eigen-decomp
     ST.start()
@@ -536,7 +568,7 @@ def main():
     pct2 = 100.0 * (evals[1] / total_var) if len(evals) >= 2 else 0.0
 
     print(f"Samples: {len(ann_pca)}")
-    print(f"SNPs used (whitelist ∩ BIM@chr22): {kept_total}")
+    print(f"SNPs used (whitelist ∩ PVAR@chr22): {kept_total}")
     print(f"PCA  PC1: {pct1:.2f}%   PC2: {pct2:.2f}% of GRM variance")
     print(f"PLS-DA components (LVs): {LV.shape[1]}  |  classes ({PLS_TARGET}): {len(class_names)}")
     print("Outputs:")
