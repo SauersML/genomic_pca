@@ -135,10 +135,10 @@ def make_plots(pcs_df: pd.DataFrame, umap_df: pd.DataFrame, out_png: Path):
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
-    # Build a population colormap across both datasets, and use fixed superpop colors
+    # Use existing pop_color_map (fixes NameError from _pop_cmap)
     all_pops = pd.concat([pcs_df["Population"], umap_df["Population"]], ignore_index=True)
-    pop_colors = _pop_cmap(all_pops)  # facecolor by Population
-    sp_colors = SUPERPOP_COLORS       # edgecolor by Superpopulation
+    pop_colors = pop_color_map(all_pops)   # facecolor by Population
+    sp_colors  = SUPERPOP_COLORS           # edgecolor by Superpopulation
 
     def scatter(ax, x, y, pop_series, sp_series, title, xlabel, ylabel):
         fc = pop_series.map(pop_colors).tolist()
@@ -146,7 +146,7 @@ def make_plots(pcs_df: pd.DataFrame, umap_df: pd.DataFrame, out_png: Path):
         ax.scatter(x, y, s=18, alpha=0.85, c=fc, edgecolors=ec, linewidths=0.6, rasterized=True)
         ax.set(title=title, xlabel=xlabel, ylabel=ylabel)
 
-        # Legend for Superpopulations (edgecolor)
+        # Legend: Superpopulations (edgecolor)
         sp_handles = [
             Line2D([0], [0], marker='o', linestyle='',
                    markerfacecolor='white', markeredgecolor=color,
@@ -157,21 +157,20 @@ def make_plots(pcs_df: pd.DataFrame, umap_df: pd.DataFrame, out_png: Path):
                            frameon=False, fontsize=8, loc="best")
         ax.add_artist(leg_sp)
 
-        # Legend for Populations (facecolor) — cap to avoid clutter
+        # Legend: Populations (facecolor), capped for readability
         unique_pops = list(pop_colors.keys())
         max_lab = 20
         pop_handles = [
             Line2D([0], [0], marker='o', linestyle='',
-                   markerfacecolor=pop_colors[p], markeredgecolor='k',
-                   label=p)
+                   markerfacecolor=pop_colors[p], markeredgecolor='k', label=p)
             for p in unique_pops[:max_lab]
         ]
         ax.legend(handles=pop_handles,
-                  title=("Population (facecolor)" if len(unique_pops) <= max_lab else
-                         f"Population (facecolor; first {max_lab})"),
+                  title=("Population (facecolor)" if len(unique_pops) <= max_lab
+                         else f"Population (facecolor; first {max_lab})"),
                   frameon=False, fontsize=7, loc="lower left")
 
-    # Two panels: PCA (PC1 vs PC2) and UMAP
+    # Two panels only: PCA (PC1 vs PC2) and UMAP
     fig, (ax_pca, ax_umap) = plt.subplots(1, 2, figsize=(14, 6))
 
     scatter(ax_pca,
@@ -189,6 +188,7 @@ def make_plots(pcs_df: pd.DataFrame, umap_df: pd.DataFrame, out_png: Path):
     fig.tight_layout()
     fig.savefig(out_png, dpi=300)
     print(f"[plot] saved {out_png}")
+
 
 # ------------------ Main ------------------
 def main():
