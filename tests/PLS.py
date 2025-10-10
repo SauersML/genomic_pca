@@ -314,23 +314,13 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- download inputs
-    bed_zip = DATA_DIR / "chr22_subset50.bed.zip"
-    bim_zip = DATA_DIR / "chr22_subset50.bim.zip"
-    fam_zip = DATA_DIR / "chr22_subset50.fam.zip"
     igsr_tsv = DATA_DIR / "igsr_samples.tsv"
     white_tsv = DATA_DIR / "GSAv2_hg38.tsv"
 
-    download(URLS["bed_zip"], bed_zip)
-    download(URLS["bim_zip"], bim_zip)
-    download(URLS["fam_zip"], fam_zip)
     download(URLS["igsr_tsv"], igsr_tsv)
     download(URLS["whitelist_tsv"], white_tsv)
 
-    unzip(bed_zip, DATA_DIR)
-    unzip(bim_zip, DATA_DIR)
-    unzip(fam_zip, DATA_DIR)
-
-    prefix = DATA_DIR / "chr22_subset50"
+    prefix = DATA_DIR / "hg38_plink1"
 
     # ---- read metadata
     fam = read_fam(prefix)
