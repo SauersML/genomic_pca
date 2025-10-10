@@ -26,9 +26,6 @@ K_LVS      = 15       # max number of PLS latent variables; also drives UMAP(PLS
 PLS_TARGET = "Population"   # class label used to supervise PLS ("Population" or "Superpopulation")
 
 URLS = {
-    "bed_zip": "https://github.com/SauersML/genomic_pca/raw/refs/heads/main/data/chr22_subset50.bed.zip",
-    "bim_zip": "https://github.com/SauersML/genomic_pca/raw/refs/heads/main/data/chr22_subset50.bim.zip",
-    "fam_zip": "https://github.com/SauersML/genomic_pca/raw/refs/heads/main/data/chr22_subset50.fam.zip",
     "igsr_tsv": "https://github.com/SauersML/genomic_pca/raw/refs/heads/main/data/igsr_samples.tsv",
     "whitelist_tsv": "https://github.com/SauersML/genomic_pca/raw/refs/heads/main/data/GSAv2_hg38.tsv",
 }
@@ -430,15 +427,6 @@ def main():
     download(URLS["igsr_tsv"], igsr_tsv)
     ST.note(f"Fetching array whitelist (hg38) → {white_tsv.name}")
     download(URLS["whitelist_tsv"], white_tsv)
-
-    # (Optional: if you also need the example chr22 PLINK files, uncomment below)
-    # bed_zip = DATA_DIR / "chr22_subset50.bed.zip"
-    # bim_zip = DATA_DIR / "chr22_subset50.bim.zip"
-    # fam_zip = DATA_DIR / "chr22_subset50.fam.zip"
-    # for key, dest in [("bed_zip", bed_zip), ("bim_zip", bim_zip), ("fam_zip", fam_zip)]:
-    #     ST.note(f"Fetching {dest.name}")
-    #     download(URLS[key], dest)
-    #     unzip(dest, DATA_DIR)
 
     prefix = "/home/user/agents/data/fast_pca_out/data/hg38_chr22"
 
