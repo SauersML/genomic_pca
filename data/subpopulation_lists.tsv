@@ -1,205 +1,188 @@
-IGSR population	SGDP population	new SGDP population
-Abkhasian	Abkhasian	Abkhasian
-Adygei	Adygei	Adygei
-African Ancestry SW		
-African Caribbean		
-Albanian	Albanian	Albanian
-Aleut	Aleut	Aleut
-Altaian	Altaian	Altaian
-Ami	Ami	Ami
-Armenian	Armenian	Armenian
-Atayal	Atayal	Atayal
-Australian	Australian	Australian
-Balochi	Balochi	Balochi
-Bantu Herero		
-Bantu Kenya		
-Bantu South Africa		
-Bantu Tswana		
-Basque	Basque	Basque
-Bedouin		
-Bedouin B		
-Bengali	Bengali	Bengali
-Bengali,Bengali		
-Bergamo	Bergamo	Bergamo
-Bergamo Italian		
-Biaka	Biaka	Biaka
-Bougainville	Bougainville	Bougainville
-Brahmin	Brahmin	Brahmin
-Brahui	Brahui	Brahui
-British		
-British,English		
-Bulgarian	Bulgarian	Bulgarian
-Burmese	Burmese	Burmese
-Burusho	Burusho	Burusho
-CEPH		
-Cambodian	Cambodian	Cambodian
-Cambodian,Cambodian		
-Chane	Chane	Chane
-Chechen	Chechen	Chechen
-Chukchi	Chukchi	Chukchi
-Colombian		
-Crete	Crete	
-Czech	Czech	Czech
-Dai	Dai	Dai
-Dai Chinese		
-Daur	Daur	Daur
-Dinka	Dinka	Dinka
-Druze	Druze	Druze
-Dusun	Dusun	Dusun
-Esan	Esan	Esan
-Esan,Esan		
-Eskimo Chaplin		
-Eskimo Naukan		
-Eskimo Sireniki		
-Estonian	Estonian	Estonian
-Even	Even	Even
-Finnish	Finnish	Finnish
-Finnish,Finnish		
-French	French	French
-Gambian Fula		
-Gambian Jola		
-Gambian Mandinka		
-Gambian Mandinka,Gambian		
-Gambian Wolof		
-Georgian	Georgian	Georgian
-Greek	Greek	Greek
-Gujarati		
-Han	Han	Han
-Han Chinese		
-Hawaiian	Hawaiian	Hawaiian
-Hazara	Hazara	Hazara
-Hezhen	Hezhen	Hezhen
-Hungarian	Hungarian	Hungarian
-Iberian		
-Iberian,Mende		
-Iberian,Spanish		
-Icelandic	Icelandic	Icelandic
-Igorot	Igorot	Igorot
-Iranian	Iranian	Iranian
-Iraqi Jew		
-Irula	Irula	Irula
-Itelman	Itelman	Itelman
-Japanese	Japanese	Japanese
-Japanese,Japanese		
-Jordanian	Jordanian	Jordanian
-Ju|'hoan North		
-Ju|'hoan North,San		
-Kalash	Kalash	Kalash
-Kapu	Kapu	Kapu
-Karitiana	Karitiana	Karitiana
-Khomani San		
-Khonda Dora		
-Kinh Vietnamese		
-Kinh,Kinh Vietnamese		
-Korean	Korean	Korean
-Kusunda	Kusunda	Kusunda
-Kyrgyz	Kyrgyz	Kyrgyz
-Lahu	Lahu	Lahu
-Lezgin	Lezgin	Lezgin
-Luhya	Luhya	Luhya
-Luhya,Luhya		
-Luo	Luo	Luo
-Madiga	Madiga	Madiga
-Makrani	Makrani	Makrani
-Mandenka	Mandenka	Mandenka
-Mansi	Mansi	Mansi
-Maori	Maori	Maori
-Masai	Masai	Masai
-Maya		
-Mayan,Maya		
-Mbuti	Mbuti	Mbuti
-Mbuti,Mbuti		
-Mende	Mende	Mende
-Mende,Mende		
-Mexican Ancestry		
-Miao	Miao	Miao
-Mixe	Mixe	Mixe
-Mixtec	Mixtec	Mixtec
-Mongola	Mongola	Mongola
-Mongolian		
-Mozabite	Mozabite	Mozabite
-Mozabite,Mozabite		
-Naxi	Naxi	Naxi
-North Ossetian		
-Northern Han		
-Norwegian	Norwegian	
-Orcadian	Orcadian	Orcadian
-Oroqen	Oroqen	Oroqen
-Palestinian	Palestinian	Palestinian
-Papuan	Papuan	Papuan
-Papuan Sepik		
-Papuan,Papuan Highlands		
-Papuan,Papuan Sepik		
-Pathan	Pathan	Pathan
-Pathan,Pathan		
-Peruvian		
-Piapoco	Piapoco	Piapoco
-Pima	Pima	Pima
-Polish	Polish	Polish
-Puerto Rican		
-Punjabi	Punjabi	Punjabi
-Punjabi,Punjabi		
-Quechua	Quechua	Quechua
-Relli	Relli	Relli
-Russian	Russian	Russian
-Saami	Saami	
-Saharawi	Saharawi	Saharawi
-Samaritan	Samaritan	Samaritan
-San		
-Sardinian	Sardinian	Sardinian
-She	She	She
-Sindhi	Sindhi	Sindhi
-Somali	Somali	Somali
-Southern Han Chinese		
-Surui	Surui	Surui
-Tajik	Tajik	Tajik
-Tamil		
-Telugu		
-Thai	Thai	Thai
-Tlingit	Tlingit	Tlingit
-Toscani		
-Tu	Tu	Tu
-Tubalar	Tubalar	Tubalar
-Tujia	Tujia	Tujia
-Turkish	Turkish	Turkish
-Tuscan	Tuscan	Tuscan
-Ulchi	Ulchi	Ulchi
-Uygur	Uygur	Uygur
-Xibo	Xibo	Xibo
-Yadava	Yadava	Yadava
-Yakut	Yakut	Yakut
-Yemenite Jew		
-Yi	Yi	Yi
-Yoruba	Yoruba	Yoruba
-Zapotec	Zapotec	Zapotec
-	BantuHerero	BantuHerero
-	BantuKenya	BantuKenya
-	BantuTswana	BantuTswana
-	BedouinB	BedouinB
-	Chipewyan	
-	Cree	
-	English	English
-	Eskimo_Chaplin	Eskimo_Chaplin
-	Eskimo_Naukan	Eskimo_Naukan
-	Eskimo_Sireniki	Eskimo_Sireniki
-	Gambian	Gambian
-	Igbo	
-	Iraqi_Jew	Iraqi_Jew
-	Ju_hoan_North	Ju_hoan_North
-	Kashmiri_Pandit	
-	Kharia	
-	Khomani_San	Khomani_San
-	Khonda_Dora	Khonda_Dora
-	Kinh	Kinh
-	Kongo	
-	Kurumba	
-	Lemande	
-	Mala	Mala
-	Mayan	Mayan
-	Nahua	
-	North_Ossetian	North_Ossetian
-	Onge	
-	Sherpa	
-	Spanish	Spanish
-	Tibetan	
-	Yemenite_Jew	Yemenite_Jew
+IGSR population	SGDP population	new SGDP population	Superpopulation	Subpopulation	Notes
+Abkhasian	Abkhasian	Abkhasian	MID	Abkhasian	
+Adygei	Adygei	Adygei	MID	Adygei	
+African Ancestry SW			AFR	African Ancestry SW	
+African Caribbean			AFR	African Caribbean	
+Albanian	Albanian	Albanian	EUR	Albanian	
+Aleut	Aleut	Aleut	EAS	Aleut	
+Altaian	Altaian	Altaian	CSA	Altaian	
+Ami	Ami	Ami	EAS	Ami	
+Armenian	Armenian	Armenian	MID	Armenian	
+Atayal	Atayal	Atayal	EAS	Atayal	
+Australian	Australian	Australian	OCE	Australian	
+Balochi	Balochi	Balochi	CSA	Balochi	
+Bantu Herero	BantuHerero	BantuHerero	AFR	Bantu	
+Bantu Kenya	BantuKenya	BantuKenya	AFR	Bantu	
+Bantu South Africa	BantuTswana	BantuTswana	AFR	Bantu	
+Bantu Tswana			AFR	Bantu	
+Basque	Basque	Basque	EUR	Basque	
+Bedouin			MID	Bedouin	
+Bedouin B	BedouinB	BedouinB	MID	BedouinB	
+Bengali	Bengali	Bengali	CSA	Bengali	
+Bengali,Bengali			CSA	Bengali	
+Bergamo	Bergamo	Bergamo	EUR	Bergamo	
+Bergamo Italian			EUR	Bergamo	
+Biaka	Biaka	Biaka	AFR	Biaka	
+Bougainville	Bougainville	Bougainville	OCE	Bougainville	
+Brahmin	Brahmin	Brahmin	CSA	Brahmin	
+Brahui	Brahui	Brahui	CSA	Brahui	
+British			EUR	British	
+British,English	English	English	EUR	English	
+Bulgarian	Bulgarian	Bulgarian	EUR	Bulgarian	
+Burmese	Burmese	Burmese	EAS	Burmese	
+Burusho	Burusho	Burusho	CSA	Burusho	
+CEPH			EUR	Utah residents with Northern and Western European ancestry	
+Cambodian	Cambodian	Cambodian	EAS	Cambodian	
+Cambodian,Cambodian			EAS	Cambodian	
+Chane	Chane	Chane	EAS	Chane	
+Chechen	Chechen	Chechen	MID	Chechen	
+Chukchi	Chukchi	Chukchi	EAS	Chukchi	
+Colombian			AMR	Colombian	
+Crete	Crete		EUR	Crete	
+Czech	Czech	Czech	EUR	Czech	
+Dai	Dai	Dai	EAS	Dai	
+Dai Chinese			EAS	Dai Chinese	
+Daur	Daur	Daur	EAS	Daur	
+Dinka	Dinka	Dinka	AFR	Dinka	
+Druze	Druze	Druze	MID	Druze	
+Dusun	Dusun	Dusun	EAS	Dusun	
+Esan	Esan	Esan	AFR	Esan	
+Esan,Esan			AFR	Esan	
+Eskimo Chaplin	Eskimo_Chaplin	Eskimo_Chaplin	EAS	Eskimo_Chaplin	
+Eskimo Naukan	Eskimo_Naukan	Eskimo_Naukan	EAS	Eskimo_Naukan	
+Eskimo Sireniki	Eskimo_Sireniki	Eskimo_Sireniki	EAS	Eskimo_Sireniki	
+Estonian	Estonian	Estonian	EUR	Estonian	
+Even	Even	Even	EAS	Even	
+Finnish	Finnish	Finnish	EUR	Finnish	
+Finnish,Finnish			EUR	Finnish	
+French	French	French	EUR	French	
+Gambian Fula			AFR	Gambian	
+Gambian Jola			AFR	Gambian	
+Gambian Mandinka			AFR	Gambian	
+Gambian Mandinka,Gambian			AFR	Gambian	
+Gambian Wolof			AFR	Gambian	
+Georgian	Georgian	Georgian	MID	Georgian	
+Greek	Greek	Greek	EUR	Greek	
+Gujarati			CSA	Gujarati	
+Han	Han	Han	EAS	Han	
+Han Chinese			EAS	Han	
+Hawaiian	Hawaiian	Hawaiian	OCE	Hawaiian	
+Hazara	Hazara	Hazara	CSA	Hazara	
+Hezhen	Hezhen	Hezhen	EAS	Hezhen	
+Hungarian	Hungarian	Hungarian	EUR	Hungarian	
+Iberian			EUR	Iberian	
+Iberian,Mende			EUR	Iberian	Likely mistake
+Iberian,Spanish	Spanish	Spanish	EUR	Spanish	
+Icelandic	Icelandic	Icelandic	EUR	Icelandic	
+Igorot	Igorot	Igorot	EAS	Igorot	
+Iranian	Iranian	Iranian	MID	Iranian	
+Iraqi Jew	Iraqi_Jew	Iraqi_Jew	MID	Iraqi_Jew	
+Irula	Irula	Irula	CSA	Irula	
+Itelman	Itelman	Itelman	EAS	Itelman	
+Japanese	Japanese	Japanese	EAS	Japanese	
+Japanese,Japanese			EAS	Japanese	
+Jordanian	Jordanian	Jordanian	MID	Jordanian	
+Ju|'hoan North	Ju_hoan_North	Ju_hoan_North	AFR	Ju_hoan_North	
+Ju|'hoan North,San			AFR	Ju_hoan_North	
+Kalash	Kalash	Kalash	CSA	Kalash	
+Kapu	Kapu	Kapu	CSA	Kapu	
+Karitiana	Karitiana	Karitiana	EAS	Karitiana	
+Khomani San	Khomani_San	Khomani_San	AFR	Khomani_San	
+Khonda Dora	Khonda_Dora	Khonda_Dora	CSA	Khonda_Dora	
+Kinh Vietnamese			EAS	Kinh	
+Kinh,Kinh Vietnamese	Kinh	Kinh	EAS	Kinh	
+Korean	Korean	Korean	EAS	Korean	
+Kusunda	Kusunda	Kusunda	CSA	Kusunda	
+Kyrgyz	Kyrgyz	Kyrgyz	CSA	Kyrgyz	
+Lahu	Lahu	Lahu	EAS	Lahu	
+Lezgin	Lezgin	Lezgin	MID	Lezgin	
+Luhya	Luhya	Luhya	AFR	Luhya	
+Luhya,Luhya			AFR	Luhya	
+Luo	Luo	Luo	AFR	Luo	
+Madiga	Madiga	Madiga	CSA	Madiga	
+Makrani	Makrani	Makrani	CSA	Makrani	
+Mandenka	Mandenka	Mandenka	AFR	Mandenka	
+Mansi	Mansi	Mansi	CSA	Mansi	
+Maori	Maori	Maori	OCE	Maori	
+Masai	Masai	Masai	AFR	Masai	
+Maya			EAS	Maya	
+Mayan,Maya	Mayan	Mayan	EAS	Mayan	
+Mbuti	Mbuti	Mbuti	AFR	Mbuti	
+Mbuti,Mbuti			AFR	Mbuti	
+Mende	Mende	Mende	AFR	Mende	
+Mende,Mende			AFR	Mende	
+Mexican Ancestry			AMR	Mexican Ancestry	
+Miao	Miao	Miao	EAS	Miao	
+Mixe	Mixe	Mixe	EAS	Mixe	
+Mixtec	Mixtec	Mixtec	EAS	Mixtec	
+Mongola	Mongola	Mongola	EAS	Mongola	
+Mongolian			EAS	Mongolian	
+Mozabite	Mozabite	Mozabite	AFR	Mozabite	
+Mozabite,Mozabite			AFR	Mozabite	
+Naxi	Naxi	Naxi	EAS	Naxi	
+North Ossetian	North_Ossetian	North_Ossetian	MID	North_Ossetian	
+Northern Han			EAS	Northern Han	
+Norwegian	Norwegian		EUR	Norwegian	
+Orcadian	Orcadian	Orcadian	EUR	Orcadian	
+Oroqen	Oroqen	Oroqen	EAS	Oroqen	
+Palestinian	Palestinian	Palestinian	MID	Palestinian	
+Papuan	Papuan	Papuan	OCE	Papuan	
+Papuan Sepik			OCE	Papuan Sepik	
+Papuan,Papuan Highlands			OCE	Papuan Highlands	
+Papuan,Papuan Sepik			OCE	Papuan Sepik	
+Pathan	Pathan	Pathan	CSA	Pathan	
+Pathan,Pathan			CSA	Pathan	
+Peruvian			AMR	Peruvian	
+Piapoco	Piapoco	Piapoco	EAS	Piapoco	
+Pima	Pima	Pima	EAS	Pima	
+Polish	Polish	Polish	EUR	Polish	
+Puerto Rican			AMR	Puerto Rican	
+Punjabi	Punjabi	Punjabi	CSA	Punjabi	
+Punjabi,Punjabi			CSA	Punjabi,Punjabi	
+Quechua	Quechua	Quechua	EAS	Quechua	
+Relli	Relli	Relli	CSA	Relli	
+Russian	Russian	Russian	EUR	Russian	
+Saami	Saami		EUR	Saami	
+Saharawi	Saharawi	Saharawi	AFR	Saharawi	
+Samaritan	Samaritan	Samaritan	MID	Samaritan	
+San			AFR	San	
+Sardinian	Sardinian	Sardinian	EUR	Sardinian	
+She	She	She	EAS	She	
+Sindhi	Sindhi	Sindhi	CSA	Sindhi	
+Somali	Somali	Somali	AFR	Somali	
+Southern Han Chinese			EAS	Southern Han	
+Surui	Surui	Surui	EAS	Surui	
+Tajik	Tajik	Tajik	CSA	Tajik	
+Tamil			CSA	Tamil	
+Telugu			CSA	Telugu	
+Thai	Thai	Thai	EAS	Thai	
+Tlingit	Tlingit	Tlingit	EAS	Tlingit	
+Toscani			EUR	Toscani	
+Tu	Tu	Tu	EAS	Tu	
+Tubalar	Tubalar	Tubalar	CSA	Tubalar	
+Tujia	Tujia	Tujia	EAS	Tujia	
+Turkish	Turkish	Turkish	MID	Turkish	
+Tuscan	Tuscan	Tuscan	EUR	Tuscan	
+Ulchi	Ulchi	Ulchi	EAS	Ulchi	
+Uygur	Uygur	Uygur	CSA	Uygur	
+Xibo	Xibo	Xibo	EAS	Xibo	
+Yadava	Yadava	Yadava	CSA	Yadava	
+Yakut	Yakut	Yakut	EAS	Yakut	
+Yemenite Jew	Yemenite_Jew	Yemenite_Jew	MID	Yemenite_Jew	
+Yi	Yi	Yi	EAS	Yi	
+Yoruba	Yoruba	Yoruba	AFR	Yoruba	
+Zapotec	Zapotec	Zapotec	EAS	Zapotec	
+	Chipewyan		EAS	Chipewyan	
+	Cree		EAS	Cree	
+	Gambian	Gambian	AFR	Gambian	
+	Igbo		AFR	Igbo	
+	Kashmiri_Pandit		CSA	Kashmiri_Pandit	
+	Kharia		CSA	Kharia	
+	Kongo		AFR	Kongo	
+	Kurumba		CSA	Kurumba	
+	Lemande		AFR	Lemande	
+	Mala	Mala	CSA	Mala	
+	Nahua		EAS	Nahua	
+	Onge		CSA	Onge	
+	Sherpa		EAS	Sherpa	
+	Tibetan		EAS	Tibetan	
