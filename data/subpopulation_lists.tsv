@@ -1,0 +1,174 @@
+Population name	Population ID	Population_ID
+Abkhasian	Abkhasian	Abkhasian
+Adygei	Adygei	Adygei
+African Ancestry SW	Albanian	Albanian
+African Caribbean	Aleut	Aleut
+Albanian	Altaian	Altaian
+Aleut	Ami	Ami
+Altaian	Armenian	Armenian
+Ami	Atayal	Atayal
+Armenian	Australian	Australian
+Atayal	Balochi	Balochi
+Australian	BantuHerero	BantuHerero
+Balochi	BantuKenya	BantuKenya
+Bantu Herero	BantuTswana	BantuTswana
+Bantu Kenya	Basque	Basque
+Bantu South Africa	BedouinB	BedouinB
+Bantu Tswana	Bengali	Bengali
+Basque	Bergamo	Bergamo
+Bedouin	Biaka	Biaka
+Bedouin B	Bougainville	Bougainville
+Bengali	Brahmin	Brahmin
+Bengali,Bengali	Brahui	Brahui
+Bergamo	Bulgarian	Bulgarian
+Bergamo Italian	Burmese	Burmese
+Biaka	Burusho	Burusho
+Bougainville	Cambodian	Cambodian
+Brahmin	Chane	Chane
+Brahui	Chechen	Chechen
+British	Chipewyan	Chukchi
+British,English	Chukchi	Czech
+Bulgarian	Cree	Dai
+Burmese	Crete	Daur
+Burusho	Czech	Dinka
+CEPH	Dai	Druze
+Cambodian	Daur	Dusun
+Cambodian,Cambodian	Dinka	English
+Chane	Druze	Esan
+Chechen	Dusun	Eskimo_Chaplin
+Chukchi	English	Eskimo_Naukan
+Colombian	Esan	Eskimo_Sireniki
+Crete	Eskimo_Chaplin	Estonian
+Czech	Eskimo_Naukan	Even
+Dai	Eskimo_Sireniki	Finnish
+Dai Chinese	Estonian	French
+Daur	Even	Gambian
+Dinka	Finnish	Georgian
+Druze	French	Greek
+Dusun	Gambian	Han
+Esan	Georgian	Hawaiian
+Esan,Esan	Greek	Hazara
+Eskimo Chaplin	Han	Hezhen
+Eskimo Naukan	Hawaiian	Hungarian
+Eskimo Sireniki	Hazara	Icelandic
+Estonian	Hezhen	Igorot
+Even	Hungarian	Iranian
+Finnish	Icelandic	Iraqi_Jew
+Finnish,Finnish	Igbo	Irula
+French	Igorot	Itelman
+Gambian Fula	Iranian	Japanese
+Gambian Jola	Iraqi_Jew	Jordanian
+Gambian Mandinka	Irula	Ju_hoan_North
+Gambian Mandinka,Gambian	Itelman	Kalash
+Gambian Wolof	Japanese	Kapu
+Georgian	Jordanian	Karitiana
+Greek	Ju_hoan_North	Khomani_San
+Gujarati	Kalash	Khonda_Dora
+Han	Kapu	Kinh
+Han Chinese	Karitiana	Korean
+Hawaiian	Kashmiri_Pandit	Kusunda
+Hazara	Kharia	Kyrgyz
+Hezhen	Khomani_San	Lahu
+Hungarian	Khonda_Dora	Lezgin
+Iberian	Kinh	Luhya
+Iberian,Mende	Kongo	Luo
+Iberian,Spanish	Korean	Madiga
+Icelandic	Kurumba	Makrani
+Igorot	Kusunda	Mala
+Iranian	Kyrgyz	Mandenka
+Iraqi Jew	Lahu	Mansi
+Irula	Lemande	Maori
+Itelman	Lezgin	Masai
+Japanese	Luhya	Mayan
+Japanese,Japanese	Luo	Mbuti
+Jordanian	Madiga	Mende
+Ju|'hoan North	Makrani	Miao
+Ju|'hoan North,San	Mala	Mixe
+Kalash	Mandenka	Mixtec
+Kapu	Mansi	Mongola
+Karitiana	Maori	Mozabite
+Khomani San	Masai	Naxi
+Khonda Dora	Mayan	North_Ossetian
+Kinh Vietnamese	Mbuti	Orcadian
+Kinh,Kinh Vietnamese	Mende	Oroqen
+Korean	Miao	Palestinian
+Kusunda	Mixe	Papuan
+Kyrgyz	Mixtec	Pathan
+Lahu	Mongola	Piapoco
+Lezgin	Mozabite	Pima
+Luhya	Nahua	Polish
+Luhya,Luhya	Naxi	Punjabi
+Luo	North_Ossetian	Quechua
+Madiga	Norwegian	Relli
+Makrani	Onge	Russian
+Mandenka	Orcadian	Saharawi
+Mansi	Oroqen	Samaritan
+Maori	Palestinian	Sardinian
+Masai	Papuan	She
+Maya	Pathan	Sindhi
+Mayan,Maya	Piapoco	Somali
+Mbuti	Pima	Spanish
+Mbuti,Mbuti	Polish	Surui
+Mende	Punjabi	Tajik
+Mende,Mende	Quechua	Thai
+Mexican Ancestry	Relli	Tlingit
+Miao	Russian	Tu
+Mixe	Saami	Tubalar
+Mixtec	Saharawi	Tujia
+Mongola	Samaritan	Turkish
+Mongolian	Sardinian	Tuscan
+Mozabite	She	Ulchi
+Mozabite,Mozabite	Sherpa	Uygur
+Naxi	Sindhi	Xibo
+North Ossetian	Somali	Yadava
+Northern Han	Spanish	Yakut
+Norwegian	Surui	Yemenite_Jew
+Orcadian	Tajik	Yi
+Oroqen	Thai	Yoruba
+Palestinian	Tibetan	Zapotec
+Papuan	Tlingit	
+Papuan Sepik	Tu	
+Papuan,Papuan Highlands	Tubalar	
+Papuan,Papuan Sepik	Tujia	
+Pathan	Turkish	
+Pathan,Pathan	Tuscan	
+Peruvian	Ulchi	
+Piapoco	Uygur	
+Pima	Xibo	
+Polish	Yadava	
+Puerto Rican	Yakut	
+Punjabi	Yemenite_Jew	
+Punjabi,Punjabi	Yi	
+Quechua	Yoruba	
+Relli	Zapotec	
+Russian		
+Saami		
+Saharawi		
+Samaritan		
+San		
+Sardinian		
+She		
+Sindhi		
+Somali		
+Southern Han Chinese		
+Surui		
+Tajik		
+Tamil		
+Telugu		
+Thai		
+Tlingit		
+Toscani		
+Tu		
+Tubalar		
+Tujia		
+Turkish		
+Tuscan		
+Ulchi		
+Uygur		
+Xibo		
+Yadava		
+Yakut		
+Yemenite Jew		
+Yi		
+Yoruba		
+Zapotec		
