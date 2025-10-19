@@ -2676,7 +2676,7 @@ HG01776	female	SAME124632	IBS	Iberian	EUR	European Ancestry	IBS	1000 Genomes on 
 NA07031	female	SAME122860	CEU	CEPH	EUR	European Ancestry	CEU	1000 Genomes 30x on GRCh38,1000 Genomes phase 3 release
 HGDP00597	male	SAMEA3302870		Druze		West Eurasia (SGDP)	DruzeSGDP	Simons Genome Diversity Project
 NA20364	female	SAME124784	ASW	African Ancestry SW	AFR	African Ancestry	ASW	1000 Genomes phase 3 release
-HG01783	male	SAME124427	IBS,MSL	Iberian,Mende	EUR,AFR	European Ancestry,African Ancestry	IBS,MSL	1000 Genomes on GRCh38,1000 Genomes 30x on GRCh38,1000 Genomes phase 3 release
+HG01783	male	SAME124427	IBS	Iberian	EUR	European Ancestry	IBS	1000 Genomes on GRCh38,1000 Genomes 30x on GRCh38,1000 Genomes phase 3 release
 NA07048	male	SAME124188	CEU	CEPH	EUR	European Ancestry	CEU	1000 Genomes on GRCh38,1000 Genomes 30x on GRCh38,1KG_ONT_VIENNA,1000 Genomes phase 3 release,1000 Genomes phase 1 release,Geuvadis
 mixe0007	female	SAMEA3302697		Mixe		America (SGDP)	MixeSGDP	Simons Genome Diversity Project
 NA20504	female	SAME124360	TSI	Toscani	EUR	European Ancestry	TSI	1000 Genomes on GRCh38,1000 Genomes 30x on GRCh38,1KG_ONT_VIENNA,1000 Genomes phase 3 release,1000 Genomes phase 1 release,Geuvadis
