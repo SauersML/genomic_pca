@@ -1,4 +1,4 @@
-IGSR population	SGDP population	new SGDP population	Superpopulation	Subpopulation	Notes
+IGSR population	SGDP population	new SGDP population	Superpopulation	meta_subpopulation	Notes
 Abkhasian	Abkhasian	Abkhasian	MID	Abkhasian	
 Adygei	Adygei	Adygei	MID	Adygei	
 African Ancestry SW			AFR	African Ancestry SW	
@@ -121,7 +121,7 @@ Mozabite	Mozabite	Mozabite	AFR	Mozabite
 Mozabite,Mozabite			AFR	Mozabite	
 Naxi	Naxi	Naxi	EAS	Naxi	
 North Ossetian	North_Ossetian	North_Ossetian	MID	North_Ossetian	
-Northern Han			EAS	Northern Han	
+Northern Han			EAS	Han	
 Norwegian	Norwegian		EUR	Norwegian	
 Orcadian	Orcadian	Orcadian	EUR	Orcadian	
 Oroqen	Oroqen	Oroqen	EAS	Oroqen	
